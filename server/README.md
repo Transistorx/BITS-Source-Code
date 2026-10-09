@@ -67,6 +67,34 @@ by the server before buffering (the application limit is 512 bytes). The broker
 side of the same hazard (HZ-10) is covered by the ACL template in
 `deploy/mosquitto/README.md`.
 
+Enable the MQTT bridge in `server/.env`:
+
+```
+MQTT_ENABLED=true
+MQTT_BROKER_HOST=<broker LAN address>
+MQTT_BROKER_PORT=1883
+MQTT_USERNAME=bits_backend
+MQTT_PASSWORD=<from the broker secrets file>
+MQTT_TLS=false
+MQTT_TLS_CA_FILE=
+LIVE_WS_DEVICE_WHITELIST=<sender ids allowed ZERO/TARE>
+MAX_WS_CLIENTS=16
+BENCH_OPEN_WRITES=false
+```
+
+The code reads the host and port from `MQTT_BROKER_HOST` / `MQTT_BROKER_PORT`.
+Run a single worker with `--ws-max-size 1024`. Do not run `BENCH_OPEN_WRITES`
+behind a reverse proxy: the proxy makes every client look like loopback.
+
+WebSocket usage: connect to `ws://<host>:8000/api/v1/live/ws`, send
+`{"type":"auth","api_key":"..."}` first when a key is required, then receive
+live weight snapshots and updates; ZERO/TARE commands are accepted only for
+ids in `LIVE_WS_DEVICE_WHITELIST`.
+
+Known risks: the pump/controller depends on the network only and needs an
+independent non-network stop. Device broker passwords are stored unencrypted in
+NVS (flash encryption off).
+
 On WSL Ubuntu, use the project virtual environment and existing `.env` values:
 
 ```bash

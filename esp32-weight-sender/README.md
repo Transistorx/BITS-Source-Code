@@ -449,3 +449,23 @@ The one deliberate change to the uart_driver copy: the RX pull-up is applied
 only when the pin supports it, and a warning is logged otherwise (see above).
 
 The copies can drift. Keep them in sync by hand.
+
+## MQTT weight publishing
+
+When MQTT is enabled the sender publishes one weight message per accepted CAS
+frame, plus a 1 s heartbeat so the server can tell a quiet scale from a dead
+link. Each message carries the `channel` field (1 or 2) of the active scale
+channel. Broker host, port, TLS flag and credentials are read from the NVS blob
+record `mqtt_cfg` (versioned, `components/broker_cfg`); when the record is
+absent the Kconfig defaults are used. The provisioning form that writes
+`mqtt_cfg` is spec task 6 and is not present yet, so until it lands the record
+must be written by other means or the Kconfig fallback used. Each device uses
+its own broker account `dev_<id>`; never share one credential across devices.
+
+### Known risks
+
+- The pump/controller depends on the network only. It needs an independent,
+  non-network stop (local hardware cutoff) so a lost link cannot leave it running.
+- The broker password is stored unencrypted in NVS because flash encryption is
+  off. Anyone with physical flash access can read it; use a per-device,
+  least-privilege `dev_<id>` account.
