@@ -5,6 +5,7 @@ convenience). No credentials live in source. See .env.example.
 """
 
 import os
+import secrets
 
 from sqlalchemy.engine import URL
 
@@ -20,10 +21,20 @@ def _bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+_CLIENT_ID_DEFAULT = f"dispense-server-{os.getpid()}-{secrets.token_hex(2)}"
+
+
 class Settings:
     @property
     def transient_command_ttl_seconds(self) -> int:
         return max(1, int(os.getenv("TRANSIENT_COMMAND_TTL_SECONDS", "10")))
+
+    @property
+    def scale_cmd_ttl_ms(self) -> int:
+        try:
+            return max(1, int(os.getenv("SCALE_CMD_TTL_MS", "3000")))
+        except ValueError:
+            return 3000
 
     @property
     def command_ttl_ms(self) -> int:
@@ -99,6 +110,27 @@ class Settings:
     @property
     def mqtt_broker_port(self) -> int:
         return int(os.getenv("MQTT_BROKER_PORT", "1883"))
+
+    @property
+    def mqtt_client_id(self) -> str:
+        return os.getenv("MQTT_CLIENT_ID", "").strip() or _CLIENT_ID_DEFAULT
+
+    @property
+    def mqtt_tls(self) -> bool:
+        return _bool("MQTT_TLS", False)
+
+    @property
+    def mqtt_tls_ca_file(self) -> str:
+        return os.getenv("MQTT_TLS_CA_FILE", "").strip()
+
+    @property
+    def live_ws_device_whitelist(self) -> list[str]:
+        return [d.strip() for d in os.getenv("LIVE_WS_DEVICE_WHITELIST", "").split(",")
+                if d.strip()]
+
+    @property
+    def bench_open_writes(self) -> bool:
+        return _bool("BENCH_OPEN_WRITES", False)
 
     # Optional broker auth. Empty username = anonymous. Never log the password.
     @property

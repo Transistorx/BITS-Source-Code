@@ -46,7 +46,7 @@ def test_scale_command_targets_sender_and_publishes(client, pub, action):
     (topic, body, qos, retain), = pub.sent
     assert topic == f"cas/{SENDER}/commands" and qos == 1 and retain is False
     assert body["type"] == action and body["channel_id"] == "CH2"
-    assert body["command_id"] == r.json()["command_id"] and body["ttl_ms"] == 10000
+    assert body["command_id"] == r.json()["command_id"] and body["ttl_ms"] == 3000
     assert _row(body["command_id"]).device_id == SENDER
 
 

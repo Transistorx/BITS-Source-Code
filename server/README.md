@@ -54,6 +54,9 @@ python -m pytest tests -q
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
 ```
 
+The MQTT bridge and the live command path require a single worker. With
+WEB_CONCURRENCY above 1 the bridge refuses to start unless MQTT_CLIENT_ID is set.
+
 Use the reachable LAN address already configured on the devices. A WSL NAT
 address or localhost from the ESP32 is not the laptop's reachable LAN address;
 verify the existing WSL forwarding/mirrored-network and firewall configuration

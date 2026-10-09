@@ -17,6 +17,7 @@ in-memory fake and need no broker or paho.
 import contextlib
 import json
 import logging
+import os
 import queue
 import re
 import threading
@@ -134,6 +135,8 @@ def command_ttl_ms(command_type: str) -> int:
     everything else the finite COMMAND_TTL_MS default so a late flush is dropped."""
     if command_type in NO_EXPIRY_TYPES:
         return 0
+    if command_type in ("ZERO", "TARE"):
+        return settings.scale_cmd_ttl_ms
     if command_type in TRANSIENT_TYPES:
         return settings.transient_command_ttl_seconds * 1000
     return settings.command_ttl_ms
@@ -333,10 +336,20 @@ class MqttWeight(BaseModel):
     """cas/{sender}/telemetry/weight: reduced observability copy, one channel."""
     model_config = ConfigDict(extra="ignore")
     uptime_ms: StrictInt = Field(ge=0, le=U32_MAX)
-    channel: Literal["CH1", "CH2"]
+    channel: Literal["CH1", "CH2"] | None = None
+    src_uart: str | None = None
     weight_g: StrictInt
     stable: StrictBool = False
     age_ms: StrictInt = Field(ge=0, lt=U32_MAX)
+
+    @model_validator(mode="after")
+    def _derive_channel(self):
+        if self.channel is None:
+            derived = {"UART1": "CH1", "UART2": "CH2"}.get(self.src_uart)
+            if derived is None:
+                raise ValueError("channel missing and src_uart unknown")
+            self.channel = derived
+        return self
 
 
 def _reject_constant(value):
@@ -691,7 +704,12 @@ def mqtt_state() -> dict:
         return {"enabled": bool(settings.mqtt_enabled), "state": "UNKNOWN"}
     with _state_lock:
         ok = _conn["connected"] and _conn["granted"]
-    return {"enabled": True, "state": "CONNECTED" if ok else "DISCONNECTED"}
+    age = None if _last_inbound is None else max(0.0, time.monotonic() - _last_inbound)
+    state = "CONNECTED" if ok else "DISCONNECTED"
+    if ok and age is not None and age >= INBOUND_STALE_S:
+        state = "DEGRADED"
+    return {"enabled": True, "state": state, "last_inbound_age_s": age,
+            "fanout_failures": _fanout_failures}
 
 
 # --- worker: no SQL on the paho callback thread -----------------------------
@@ -699,6 +717,9 @@ def mqtt_state() -> dict:
 _queue: "queue.Queue" = queue.Queue(maxsize=QUEUE_MAX)
 _worker: threading.Thread | None = None
 _dropped = 0
+_last_inbound: float | None = None
+_fanout_failures = 0
+INBOUND_STALE_S = 30
 _INLINE_KINDS = ("live", "weight")  # memory-only; cheap enough for the callback
 
 
@@ -709,6 +730,8 @@ def enqueue_message(topic: str, payload: bytes, retain: bool) -> None:
     parsed = parse_topic(topic)
     if parsed is None:
         return
+    global _last_inbound
+    _last_inbound = time.monotonic()
     if parsed[1] in _INLINE_KINDS:
         handle_message(topic, payload, retain)
         return
@@ -770,7 +793,10 @@ def startup_recovery() -> None:
                     DeviceCommand.state.in_(("PENDING", "DELIVERED")))
                     .order_by(DeviceCommand.id)):
                 if row.state == "PENDING":
-                    if _too_old(row):
+                    if row.command_type in ("ZERO", "TARE"):
+                        row.state, row.updated_at = "EXPIRED", now
+                        row.error_text = "not republished after restart"
+                    elif _too_old(row):
                         row.state, row.updated_at = "EXPIRED", now
                         row.error_text = "expired before delivery"
                     elif not row.held:
@@ -801,16 +827,26 @@ def configure_client(client) -> None:
     client.reconnect_delay_set(min_delay=1, max_delay=30)  # exponential backoff
 
 
+def _worker_count() -> int:
+    try:
+        return int(os.getenv("WEB_CONCURRENCY", "1"))
+    except ValueError:
+        return 1
+
+
 def start() -> None:
     global _client
     if not settings.mqtt_enabled or _client is not None:
+        return
+    if _worker_count() > 1 and not os.getenv("MQTT_CLIENT_ID", "").strip():
+        log.error("MQTT bridge refused: multiple workers need an explicit MQTT_CLIENT_ID")
         return
     try:
         import paho.mqtt.client as mqtt
     except ImportError:
         log.error("paho-mqtt not installed; MQTT bridge disabled")
         return
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="dispense-server")
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=settings.mqtt_client_id)
 
     def on_connect(c, _u, _f, reason_code, _p=None):
         handle_connect(c, reason_code)

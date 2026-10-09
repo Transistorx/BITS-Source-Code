@@ -174,7 +174,7 @@ def test_stale_command_never_published(client, pub):
 
 @pytest.mark.parametrize("ctype,expected", [
     ("JOB", 30000), ("CANCEL", 30000), ("HOLD", 30000), ("RELEASE", 30000),
-    ("PROMOTE", 30000), ("PROFILE", 30000), ("ZERO", 10000), ("TARE", 10000),
+    ("PROMOTE", 30000), ("PROFILE", 30000), ("ZERO", 3000), ("TARE", 3000),
     ("PUMP_START", 10000), ("READY", 10000), ("ESTOP", 0), ("PUMP_STOP", 0),
 ])
 def test_ttl_ms_by_type(ctype, expected):
