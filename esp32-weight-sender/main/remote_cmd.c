@@ -10,6 +10,7 @@
 #include "mqtt_link_core.h"
 #include "nvs_config.h"
 #include "scale_cmd.h"
+#include "task_hb.h"
 #include "weight_source.h"
 
 static const char *TAG = "CMD";
@@ -95,6 +96,7 @@ static void scale_cmd_task(void *arg)
     (void)arg;
     scale_cmd_ack_t ack;
     for (;;) {
+        task_hb_bump(TASK_HB_SCALE_CMD);
         if (scale_cmd_run_one(&s_cmd, 1000U, &ack)) publish_ack(&ack);
     }
 }

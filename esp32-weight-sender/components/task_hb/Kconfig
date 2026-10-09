@@ -1,0 +1,28 @@
+menu "Task heartbeats (application supervision)"
+
+    config TASK_HB_FROZEN_MS
+        int "Heartbeat frozen threshold (ms)"
+        default 10000
+        range 2000 60000
+        help
+            A task heartbeat counter that does not change for this long is
+            logged as a fault with reason code HB_FROZEN_<task>.
+
+    config TASK_HB_LINK_RESTART_MS
+        int "mqtt_pub frozen threshold for a link restart (ms)"
+        default 30000
+        range 10000 300000
+        help
+            A frozen mqtt_pub heartbeat for this long triggers
+            mqtt_link_stop/start (reason HB_LINK_RESTART_MQTT_PUB).
+
+    config TASK_HB_RESTART_WINDOW_MS
+        int "Window for escalating to esp_restart (ms)"
+        default 600000
+        range 60000 3600000
+        help
+            A second frozen mqtt_pub heartbeat within this window after a
+            link restart triggers a logged esp_restart (reason
+            HB_RESTART_MQTT_PUB). Non-safety auto-recovery with a cap.
+
+endmenu

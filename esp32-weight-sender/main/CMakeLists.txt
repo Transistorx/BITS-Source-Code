@@ -4,5 +4,5 @@ idf_component_register(
     REQUIRES wifi_manager websocket_server weight_source
              drivers scale_hal scale_manager scale_protocols interfaces
              board nvs_config provisioning led_status esp_driver_gpio
-             mqtt_link mqtt_link_core scale_cmd log_util
+             mqtt_link mqtt_link_core scale_cmd log_util task_hb
 )

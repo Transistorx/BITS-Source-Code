@@ -13,6 +13,7 @@
 #include "provisioning.h"
 #include "remote_cmd.h"
 #include "sdkconfig.h"
+#include "task_hb.h"
 #include "websocket_server.h"
 #include "weight_source.h"
 #include "wifi_manager.h"
@@ -71,10 +72,54 @@ static const char *TAG_QUEUE = "QUEUE";
  * the weight path. Presence (online:true) is the MQTT birth message, sent on
  * connect by mqtt_link, never from here.
  */
+static void hb_supervise(uint32_t now_ms, const mqtt_link_stats_t *m)
+{
+    static uint32_t prev_mask;
+    static bool link_restarted;
+    static uint32_t link_restart_ms;
+    const uint32_t pub_bit = 1U << TASK_HB_MQTT_PUB;
+    bool link_live = m->link_state != (uint8_t)MQTT_LC_IDLE || link_restarted;
+    uint32_t mask = 0U;
+    uint32_t mask_long = 0U;
+
+    (void)task_hb_check(now_ms, CONFIG_TASK_HB_FROZEN_MS, &mask);
+    if (!link_live) mask &= ~pub_bit;
+    for (unsigned i = 0U; i < (unsigned)TASK_HB_COUNT; i++) {
+        uint32_t bit = 1U << i;
+        if ((mask & bit) != 0U && (prev_mask & bit) == 0U) {
+            ESP_LOGE(TAG, "task heartbeat frozen > %u ms reason=HB_FROZEN_%s",
+                     (unsigned)CONFIG_TASK_HB_FROZEN_MS, task_hb_name((task_hb_id_t)i));
+        } else if ((mask & bit) == 0U && (prev_mask & bit) != 0U) {
+            ESP_LOGW(TAG, "task heartbeat recovered reason=HB_RECOVERED_%s", task_hb_name((task_hb_id_t)i));
+        }
+    }
+    prev_mask = mask;
+
+    (void)task_hb_check(now_ms, CONFIG_TASK_HB_LINK_RESTART_MS, &mask_long);
+    if ((mask_long & pub_bit) == 0U || !link_live) return;
+    if (link_restarted && (uint32_t)(now_ms - link_restart_ms) < CONFIG_TASK_HB_LINK_RESTART_MS) return;
+    if (link_restarted && (uint32_t)(now_ms - link_restart_ms) < CONFIG_TASK_HB_RESTART_WINDOW_MS) {
+        ESP_LOGE(TAG, "mqtt_pub frozen again within %u s of a link restart; rebooting reason=HB_RESTART_MQTT_PUB",
+                 (unsigned)(CONFIG_TASK_HB_RESTART_WINDOW_MS / 1000U));
+        vTaskDelay(pdMS_TO_TICKS(100));
+        esp_restart();
+    }
+    ESP_LOGE(TAG, "mqtt_pub frozen > %u ms; restarting link reason=HB_LINK_RESTART_MQTT_PUB",
+             (unsigned)CONFIG_TASK_HB_LINK_RESTART_MS);
+    esp_err_t err = mqtt_link_stop();
+    if (err == ESP_OK) err = mqtt_link_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG_MQTT, "link restart failed: %s", esp_err_to_name(err));
+    }
+    link_restarted = true;
+    link_restart_ms = now_ms;
+}
+
 static void server_health_task(void *arg)
 {
     (void)arg;
     static char body[MQTT_LINK_PAYLOAD_MAX + 1U];
+    static uint32_t hb[TASK_HB_COUNT];
 
     for (;;) {
         uint32_t now_ms = weight_source_now_ms();
@@ -84,6 +129,8 @@ static void server_health_task(void *arg)
                                : UINT32_MAX;
         mqtt_link_stats_t m;
         mqtt_link_get_stats(&m);
+        hb_supervise(now_ms, &m);
+        for (unsigned i = 0U; i < (unsigned)TASK_HB_COUNT; i++) hb[i] = task_hb_count((task_hb_id_t)i);
         mqtt_link_status_t st = {
             .role = "weight_sender",
             .boot_id = mqtt_link_boot_id(),
@@ -93,6 +140,8 @@ static void server_health_task(void *arg)
             .cas_age_ms = cas_age,
             .ws_client = websocket_server_has_client(),
             .uptime_ms = now_ms,
+            .hb = hb,
+            .hb_n = (uint8_t)TASK_HB_COUNT,
         };
         if (mqtt_link_status_json(body, sizeof(body), &st, &m) == 0U) {
             ESP_LOGE(TAG, "status body overflow reason=MQTT_STATUS_TOO_BIG");
@@ -110,7 +159,6 @@ static void server_health_start(void)
     if (err == ESP_OK) err = mqtt_link_start();
     if (err != ESP_OK) {
         ESP_LOGW(TAG_MQTT, "link not started: %s", esp_err_to_name(err));
-        return;
     }
     if (xTaskCreate(server_health_task, "dev_status", 4096, NULL, 3, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Could not start device status task");
@@ -224,6 +272,7 @@ static void transmit_task(void *arg)
     TickType_t wake = xTaskGetTickCount();
 
     while (1) {
+        task_hb_bump(TASK_HB_WEIGHT_TX);
         uint32_t now_ms = weight_source_now_ms();
 
         bool has_client = websocket_server_has_client();

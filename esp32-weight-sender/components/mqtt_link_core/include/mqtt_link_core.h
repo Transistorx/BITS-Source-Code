@@ -263,7 +263,11 @@ typedef struct {
     uint32_t cas_age_ms;
     bool ws_client;
     uint32_t uptime_ms;
+    const uint32_t *hb;
+    uint8_t hb_n;
 } mqtt_link_status_t;
+
+#define MQTT_LINK_STATUS_HB_MAX 3U
 
 size_t mqtt_link_status_json(char *out, size_t cap, const mqtt_link_status_t *st,
                              const mqtt_link_stats_t *m);

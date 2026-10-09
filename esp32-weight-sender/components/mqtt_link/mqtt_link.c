@@ -21,6 +21,7 @@
 #include "nvs.h"
 #include "nvs_config.h"
 #include "sdkconfig.h"
+#include "task_hb.h"
 
 static const char *TAG = "MQTT";
 
@@ -335,6 +336,7 @@ static void mqtt_pub_task(void *arg)
     log_ratelimit_init(&fail_rl);
 
     while (mqtt_link_lc_running(&s_lc)) {
+        task_hb_bump(TASK_HB_MQTT_PUB);
         uint32_t poll_ms = (uint32_t)(esp_timer_get_time() / 1000);
         bool got = mqtt_link_queue_next(&s_queues, &item, MQTT_POLL_MS, poll_ms,
                                         MQTT_HB_PERIOD_MS);

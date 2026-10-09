@@ -629,7 +629,23 @@ size_t mqtt_link_status_json(char *out, size_t cap, const mqtt_link_status_t *st
                      (unsigned long)m->dropped_other, (unsigned long)m->dropped_offline,
                      (unsigned)m->heap_min_kb, (unsigned)m->stop_pub_stuck,
                      (unsigned)m->stop_deferred);
-    if (n <= 0 || (size_t)n >= cap || (size_t)n > MQTT_LINK_PAYLOAD_MAX) return 0U;
+    if (n <= 0 || (size_t)n >= cap) return 0U;
+    if (st->hb != NULL && st->hb_n > 0U) {
+        size_t pos = (size_t)n - 1U;
+        unsigned count = st->hb_n > MQTT_LINK_STATUS_HB_MAX ? MQTT_LINK_STATUS_HB_MAX : st->hb_n;
+        int k = snprintf(out + pos, cap - pos, ",\"hb\":[");
+        if (k <= 0 || (size_t)k >= cap - pos) return 0U;
+        pos += (size_t)k;
+        for (unsigned i = 0U; i < count; i++) {
+            k = snprintf(out + pos, cap - pos, "%s%u", i > 0U ? "," : "", (unsigned)(st->hb[i] % 256U));
+            if (k <= 0 || (size_t)k >= cap - pos) return 0U;
+            pos += (size_t)k;
+        }
+        k = snprintf(out + pos, cap - pos, "]}");
+        if (k <= 0 || (size_t)k >= cap - pos) return 0U;
+        n = (int)(pos + (size_t)k);
+    }
+    if ((size_t)n > MQTT_LINK_PAYLOAD_MAX) return 0U;
     return (size_t)n;
 }
 
