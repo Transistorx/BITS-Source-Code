@@ -51,6 +51,9 @@ void scale_cmd_test_allow_post_encode(bool on);
 #define SCALE_CMD_QUEUE_DEPTH    4U
 #define SCALE_CMD_DEDUPE_SLOTS   16U
 #define SCALE_CMD_TTL_MAX_MS     60000U
+#define SCALE_CMD_ZT_TTL_MAX_MS  10000U
+#define SCALE_CMD_ZT_RATE_MS     2000U
+#define SCALE_CMD_CHANNELS       2U
 #define SCALE_CMD_FRAME_MAX      16U
 
 typedef enum {
@@ -137,6 +140,8 @@ typedef struct {
     bool running;
     scale_cmd_slot_t slots[SCALE_CMD_DEDUPE_SLOTS];
     uint32_t next_stamp;
+    uint32_t last_accept_ms[SCALE_CMD_CHANNELS];
+    bool rate_armed[SCALE_CMD_CHANNELS];
 } scale_cmd_t;
 
 typedef enum {

@@ -278,11 +278,16 @@ scale_submit_t scale_cmd_submit(scale_cmd_t *s, const char *payload, size_t len,
                         ttl == 0U)) {
         bad = "ttl_ms required (1..60000)";
     }
+    if (bad == NULL && ttl > SCALE_CMD_ZT_TTL_MAX_MS) bad = "ttl too long (ttl_ms max 10000 for ZERO/TARE)";
     if (bad == NULL && (uint32_t)(s->cfg.now_ms() - recv_ms) > ttl) {
         bad = "expired before start";
         bad_result = SCALE_RESULT_TIMEOUT;
     }
     if (bad == NULL && s->running) bad = "busy: another scale command is running";
+    if (bad == NULL && s->rate_armed[channel - 1U] &&
+        (uint32_t)(s->cfg.now_ms() - s->last_accept_ms[channel - 1U]) < SCALE_CMD_ZT_RATE_MS) {
+        bad = "rate limited (one ZERO/TARE per 2 s per channel)";
+    }
 
     const char *state_name = "UNKNOWN";
     if (bad == NULL && !s->cfg.link_online(&state_name)) {
@@ -306,6 +311,8 @@ scale_submit_t scale_cmd_submit(scale_cmd_t *s, const char *payload, size_t len,
     p->channel = channel;
     p->ttl_ms = ttl;
     p->recv_ms = recv_ms;
+    s->last_accept_ms[channel - 1U] = s->cfg.now_ms();
+    s->rate_armed[channel - 1U] = true;
     s->q_count++;
     scale_cmd_slot_t *slot = slot_alloc(s);
     slot->id = id;
