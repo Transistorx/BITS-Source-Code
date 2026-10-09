@@ -132,6 +132,20 @@ class Settings:
     def bench_open_writes(self) -> bool:
         return _bool("BENCH_OPEN_WRITES", False)
 
+    @property
+    def live_ws_client_timeout_ms(self) -> int:
+        try:
+            return min(30000, max(500, int(os.getenv("LIVE_WS_CLIENT_TIMEOUT_MS", "3000"))))
+        except ValueError:
+            return 3000
+
+    @property
+    def live_ws_send_timeout_ms(self) -> int:
+        try:
+            return min(30000, max(200, int(os.getenv("LIVE_WS_SEND_TIMEOUT_MS", "2000"))))
+        except ValueError:
+            return 2000
+
     # Optional broker auth. Empty username = anonymous. Never log the password.
     @property
     def mqtt_username(self) -> str:

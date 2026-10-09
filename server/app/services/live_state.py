@@ -207,6 +207,14 @@ class LiveState:
                 int(max(0.0, now - c[3]) * 1000) for c in chans.values())}
         return out
 
+    def sender_view(self, sender_id):
+        with self._lock:
+            chans = self._sender.get(sender_id)
+            if not chans:
+                return None
+            revision, chans = self._revision, dict(chans)
+        return revision, self._sender_view({sender_id: chans}, self._clock())[sender_id]
+
     def snapshot(self):
         with self._lock:
             self._evict(self._clock())

@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .services import command_claim, profile_pin
+from .services.live_hub import live_hub
 from .services.errors import ServiceError  # no fastapi import: app.service runs headless
 
 log = logging.getLogger(__name__)
@@ -123,6 +124,8 @@ def build_command_payload(row, db: Session) -> dict:
     if channel is None and row.material_id in ("M1", "M2"):
         channel = "CH1" if row.material_id == "M1" else "CH2"
     body["channel_id"] = channel
+    if row.command_type in ("ZERO", "TARE"):
+        body["device_id"] = row.device_id
     body["issued_at"] = _iso_ms(row.created_at)
     body["ttl_ms"] = command_ttl_ms(row.command_type)
     if isinstance(body.get("profile"), dict):  # CONTRACT 9.3: pin hash for the ACK check
@@ -429,8 +432,9 @@ def _weight(device_id: str, body: dict) -> None:
         err = exc.errors()[0]
         live_state.note_reject(device_id, f"{'.'.join(str(x) for x in err['loc'])}: {err['type']}")
         return
-    live_state.update_sender_weight(device_id, msg.channel, msg.uptime_ms, msg.weight_g,
-                                    msg.age_ms, msg.stable, boot_id=_valid_boot_id(body))
+    if live_state.update_sender_weight(device_id, msg.channel, msg.uptime_ms, msg.weight_g,
+                                       msg.age_ms, msg.stable, boot_id=_valid_boot_id(body)):
+        live_hub.on_weight_threadsafe(device_id)
 
 
 def _valid_boot_id(body: dict) -> str | None:
@@ -461,6 +465,8 @@ def note_boot_id(db: Session, device_id: str, boot_id: str | None) -> None:
             cmd.ack_json = {**(cmd.ack_json or {}), "reason": REBOOT_REASON}
         log.warning("MQTT boot_id changed for %s; closed unacked commands", device_id)
     db.commit()
+    if previous is not None:
+        live_hub.on_reboot_threadsafe(device_id)
 
 
 def _status(db: Session, device_id: str, body: dict) -> None:
@@ -532,6 +538,8 @@ def _ack(db: Session, device_id: str, body: dict, enforce_pin: bool = False) -> 
         channel_id=ack.channel_id, error=error[:120] if error else None,
         result=ack.result, reason=ack.reason[:120] if ack.reason else None,
         weight_g=ack.weight_g, stable=ack.stable))
+    db.refresh(row)
+    live_hub.on_ack_threadsafe(row.id, device_id, {"state": row.state, **(row.ack_json or {})})
 
 
 def _presence(db: Session, device_id: str, body: dict, retained: bool) -> None:
@@ -692,12 +700,14 @@ def handle_subscribe(mid, reason_codes) -> None:
     if granted:
         log.info("MQTT bridge subscribed")
         _request_recovery()
+        live_hub.on_link_up_threadsafe()
 
 
 def handle_disconnect(c, reason_code) -> None:
     with _state_lock:
         _conn.update(connected=False, pending=set(), granted=False)
     drop_queued_outgoing(c)  # nothing unconfirmed may flush after reconnect
+    live_hub.on_link_lost_threadsafe()
     _log_limited("disconnect", "MQTT bridge disconnected (%s); paho will retry", reason_code)
 
 
@@ -714,7 +724,7 @@ def mqtt_state() -> dict:
     if ok and age is not None and age >= INBOUND_STALE_S:
         state = "DEGRADED"
     return {"enabled": True, "state": state, "last_inbound_age_s": age,
-            "fanout_failures": _fanout_failures}
+            "fanout_failures": live_hub.health()["fanout_failures"]}
 
 
 # --- worker: no SQL on the paho callback thread -----------------------------
@@ -723,7 +733,6 @@ _queue: "queue.Queue" = queue.Queue(maxsize=QUEUE_MAX)
 _worker: threading.Thread | None = None
 _dropped = 0
 _last_inbound: float | None = None
-_fanout_failures = 0
 INBOUND_STALE_S = 30
 _INLINE_KINDS = ("live", "weight")  # memory-only; cheap enough for the callback
 
@@ -883,8 +892,9 @@ def start() -> None:
 
 
 def stop() -> None:
-    global _client, _worker, _recovered
+    global _client, _worker, _recovered, _last_inbound
     set_publisher(None)
+    _last_inbound = None
     with _state_lock:
         _conn.update(connected=False, pending=set(), granted=False)
     _recovered = False

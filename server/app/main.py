@@ -21,6 +21,7 @@ from .routes.runs import router as runs_router
 from .routes.telemetry import router as telemetry_router
 from .routes.operations import router as operations_router
 from .routes.live import router as live_router
+from .routes.live_ws import router as live_ws_router
 from .services.analytics import utcnow
 
 log = logging.getLogger(__name__)
@@ -55,8 +56,13 @@ class StaticNoCacheMiddleware(BaseHTTPMiddleware):
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    import asyncio
+    from .services.live_hub import live_hub
     from .services.live_state import live_state
     live_state.clear()
+    live_hub.bind_loop(asyncio.get_running_loop())
+    if settings.bench_open_writes and not settings.api_key:
+        log.warning("BENCH_OPEN_WRITES active with empty API_KEY: live WS commands need no key")
     # A DB outage must not keep the observability process from starting. The
     # DB dependency retries schema initialisation when the database returns.
     try:
@@ -69,6 +75,7 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         mqtt_bridge.stop()
+        live_hub.bind_loop(None)
 
 
 app = FastAPI(
@@ -95,6 +102,7 @@ app.include_router(telemetry_router)
 app.include_router(runs_router)
 app.include_router(operations_router)
 app.include_router(live_router)
+app.include_router(live_ws_router)
 
 
 @app.get("/health")
