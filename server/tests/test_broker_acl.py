@@ -30,14 +30,26 @@ INV = {
     "relays": [{"id": "rly1", "sender": "snd1"}, {"id": "rly2", "sender": "snd2"}],
     "stations": ["st1", "st2"],
 }
+TEMPLATES = ("bits.conf", "acl.conf", "gen_config.py")
 
 
 def wsl(*args, **kw):
     return subprocess.run(["wsl", "-d", DISTRO, "-e", *args], capture_output=True, text=True, timeout=30, **kw)
 
 
+def require_templates():
+    missing = [name for name in TEMPLATES if not (DEPLOY / name).is_file()]
+    if missing:
+        pytest.fail(f"broker templates missing from git: {missing} (REQ-WMQ-29, HZ-10)")
+
+
+def test_deploy_templates_present():
+    require_templates()
+
+
 @pytest.fixture(scope="module")
 def broker(tmp_path_factory):
+    require_templates()
     if not shutil.which("wsl"):
         pytest.skip("wsl not available")
     try:
@@ -172,6 +184,7 @@ def delivered(subscriber, flt, publisher, topic, expect):
 
 
 def test_conf_has_no_anonymous():
+    require_templates()
     text = (DEPLOY / "bits.conf").read_text()
     active = [l for l in text.splitlines() if not l.lstrip().startswith("#")]
     assert not any(re.match(r"\s*allow_anonymous\s+true", l) for l in active)

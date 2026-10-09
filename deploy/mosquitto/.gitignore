@@ -1,0 +1,6 @@
+passwd
+mqtt-users.json
+secrets*.json
+*.key
+*.crt
+*.pem
