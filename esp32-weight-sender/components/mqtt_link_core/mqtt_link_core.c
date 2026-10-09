@@ -646,7 +646,8 @@ size_t mqtt_link_status_json(char *out, size_t cap, const mqtt_link_status_t *st
             if (k <= 0 || (size_t)k >= cap - pos) return 0U;
             pos += (size_t)k;
         }
-        k = snprintf(out + pos, cap - pos, "]}");
+        k = snprintf(out + pos, cap - pos, "],\"hb_reboots\":%u,\"hb_degraded\":%d}",
+                     (unsigned)st->hb_reboots, st->hb_degraded ? 1 : 0);
         if (k <= 0 || (size_t)k >= cap - pos) return 0U;
         n = (int)(pos + (size_t)k);
     }

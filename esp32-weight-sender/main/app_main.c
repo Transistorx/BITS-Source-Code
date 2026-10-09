@@ -1,6 +1,7 @@
 ﻿#include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_attr.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -14,6 +15,7 @@
 #include "remote_cmd.h"
 #include "sdkconfig.h"
 #include "task_hb.h"
+#include "task_hb_policy.h"
 #include "websocket_server.h"
 #include "weight_source.h"
 #include "wifi_manager.h"
@@ -72,13 +74,62 @@ static const char *TAG_QUEUE = "QUEUE";
  * the weight path. Presence (online:true) is the MQTT birth message, sent on
  * connect by mqtt_link, never from here.
  */
+#define HB_RTC_MAGIC 0x48425243U
+
+typedef struct {
+    uint32_t magic;
+    uint32_t reboots;
+    uint32_t check;
+} hb_rtc_record_t;
+
+static RTC_NOINIT_ATTR hb_rtc_record_t s_hb_rtc;
+static task_hb_policy_state_t s_hb_policy;
+
+static const task_hb_policy_cfg_t k_hb_cfg = {
+    .link_restart_ms = CONFIG_TASK_HB_LINK_RESTART_MS,
+    .restart_window_ms = CONFIG_TASK_HB_RESTART_WINDOW_MS,
+    .stable_ms = CONFIG_TASK_HB_REBOOT_STABLE_MS,
+    .reboot_cap = CONFIG_TASK_HB_REBOOT_CAP,
+};
+
+static void hb_rtc_store(uint32_t reboots)
+{
+    s_hb_rtc.magic = HB_RTC_MAGIC;
+    s_hb_rtc.reboots = reboots;
+    s_hb_rtc.check = ~reboots;
+}
+
+static void hb_policy_init(void)
+{
+    esp_reset_reason_t rr = esp_reset_reason();
+    bool valid = s_hb_rtc.magic == HB_RTC_MAGIC && s_hb_rtc.check == ~s_hb_rtc.reboots &&
+                 s_hb_rtc.reboots <= UINT8_MAX;
+    if (!valid) hb_rtc_store(0U);
+    s_hb_policy.reboots = (uint8_t)s_hb_rtc.reboots;
+    s_hb_policy.degraded = s_hb_policy.reboots >= (uint8_t)CONFIG_TASK_HB_REBOOT_CAP;
+    ESP_LOGI(TAG, "reset reason=%d hb_reboots=%u cap=%u rtc_record=%s", (int)rr,
+             (unsigned)s_hb_policy.reboots, (unsigned)CONFIG_TASK_HB_REBOOT_CAP,
+             valid ? "valid" : "reset");
+    if (s_hb_policy.degraded) {
+        ESP_LOGE(TAG, "heartbeat reboot cap reached; staying up degraded reason=HB_REBOOT_CAPPED");
+    }
+}
+
+static void hb_link_restart(void)
+{
+    esp_err_t err = mqtt_link_stop();
+    if (err == ESP_OK) err = mqtt_link_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG_MQTT, "link restart failed: %s", esp_err_to_name(err));
+    }
+}
+
 static void hb_supervise(uint32_t now_ms, const mqtt_link_stats_t *m)
 {
     static uint32_t prev_mask;
-    static bool link_restarted;
-    static uint32_t link_restart_ms;
     const uint32_t pub_bit = 1U << TASK_HB_MQTT_PUB;
-    bool link_live = m->link_state != (uint8_t)MQTT_LC_IDLE || link_restarted;
+    bool link_idle = m->link_state == (uint8_t)MQTT_LC_IDLE;
+    bool link_live = task_hb_policy_link_live(&s_hb_policy, &k_hb_cfg, now_ms, link_idle);
     uint32_t mask = 0U;
     uint32_t mask_long = 0U;
 
@@ -96,23 +147,38 @@ static void hb_supervise(uint32_t now_ms, const mqtt_link_stats_t *m)
     prev_mask = mask;
 
     (void)task_hb_check(now_ms, CONFIG_TASK_HB_LINK_RESTART_MS, &mask_long);
-    if ((mask_long & pub_bit) == 0U || !link_live) return;
-    if (link_restarted && (uint32_t)(now_ms - link_restart_ms) < CONFIG_TASK_HB_LINK_RESTART_MS) return;
-    if (link_restarted && (uint32_t)(now_ms - link_restart_ms) < CONFIG_TASK_HB_RESTART_WINDOW_MS) {
-        ESP_LOGE(TAG, "mqtt_pub frozen again within %u s of a link restart; rebooting reason=HB_RESTART_MQTT_PUB",
-                 (unsigned)(CONFIG_TASK_HB_RESTART_WINDOW_MS / 1000U));
+    uint8_t reboots_before = s_hb_policy.reboots;
+    task_hb_action_t act = task_hb_policy_step(&s_hb_policy, &k_hb_cfg, now_ms, link_idle,
+                                               (mask_long & pub_bit) != 0U);
+    if (s_hb_policy.reboots != reboots_before) {
+        hb_rtc_store(s_hb_policy.reboots);
+        if (s_hb_policy.reboots == 0U) {
+            ESP_LOGI(TAG, "stable uptime %u s; heartbeat reboot counter cleared reason=HB_REBOOT_CLEARED",
+                     (unsigned)(CONFIG_TASK_HB_REBOOT_STABLE_MS / 1000U));
+        }
+    }
+    switch (act) {
+    case TASK_HB_ACT_LINK_RESTART:
+        ESP_LOGE(TAG, "mqtt_pub frozen > %u ms; restarting link reason=HB_LINK_RESTART_MQTT_PUB",
+                 (unsigned)CONFIG_TASK_HB_LINK_RESTART_MS);
+        hb_link_restart();
+        break;
+    case TASK_HB_ACT_REBOOT:
+        ESP_LOGE(TAG, "mqtt_pub frozen again within %u s of a link restart; rebooting %u/%u reason=HB_RESTART_MQTT_PUB",
+                 (unsigned)(CONFIG_TASK_HB_RESTART_WINDOW_MS / 1000U), (unsigned)s_hb_policy.reboots,
+                 (unsigned)CONFIG_TASK_HB_REBOOT_CAP);
         vTaskDelay(pdMS_TO_TICKS(100));
         esp_restart();
+        break;
+    case TASK_HB_ACT_LINK_RESTART_DEGRADED:
+        ESP_LOGE(TAG, "mqtt_pub frozen; reboot cap %u reached, restarting link only reason=HB_REBOOT_CAPPED",
+                 (unsigned)CONFIG_TASK_HB_REBOOT_CAP);
+        hb_link_restart();
+        break;
+    case TASK_HB_ACT_NONE:
+    default:
+        break;
     }
-    ESP_LOGE(TAG, "mqtt_pub frozen > %u ms; restarting link reason=HB_LINK_RESTART_MQTT_PUB",
-             (unsigned)CONFIG_TASK_HB_LINK_RESTART_MS);
-    esp_err_t err = mqtt_link_stop();
-    if (err == ESP_OK) err = mqtt_link_start();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG_MQTT, "link restart failed: %s", esp_err_to_name(err));
-    }
-    link_restarted = true;
-    link_restart_ms = now_ms;
 }
 
 static void server_health_task(void *arg)
@@ -142,6 +208,8 @@ static void server_health_task(void *arg)
             .uptime_ms = now_ms,
             .hb = hb,
             .hb_n = (uint8_t)TASK_HB_COUNT,
+            .hb_reboots = s_hb_policy.reboots,
+            .hb_degraded = s_hb_policy.degraded,
         };
         if (mqtt_link_status_json(body, sizeof(body), &st, &m) == 0U) {
             ESP_LOGE(TAG, "status body overflow reason=MQTT_STATUS_TOO_BIG");
@@ -155,6 +223,7 @@ static void server_health_task(void *arg)
 static void server_health_start(void)
 {
     mqtt_link_set_identity(FIRMWARE_VERSION, "weight_sender");
+    hb_policy_init();
     esp_err_t err = remote_cmd_start();
     if (err == ESP_OK) err = mqtt_link_start();
     if (err != ESP_OK) {

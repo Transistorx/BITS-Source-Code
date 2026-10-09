@@ -267,6 +267,8 @@ typedef struct {
     uint32_t uptime_ms;
     const uint32_t *hb;
     uint8_t hb_n;
+    uint8_t hb_reboots;
+    bool hb_degraded;
 } mqtt_link_status_t;
 
 #define MQTT_LINK_STATUS_HB_MAX 3U

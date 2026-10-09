@@ -25,4 +25,23 @@ menu "Task heartbeats (application supervision)"
             link restart triggers a logged esp_restart (reason
             HB_RESTART_MQTT_PUB). Non-safety auto-recovery with a cap.
 
+    config TASK_HB_REBOOT_CAP
+        int "Heartbeat reboots allowed before degraded mode"
+        default 3
+        range 0 10
+        help
+            Number of HB_RESTART_MQTT_PUB reboots tolerated within one
+            stable-uptime period. The count lives in RTC_NOINIT memory so it
+            survives esp_restart without NVS wear and is cleared by a power
+            cycle or an invalid record. Once reached the device stays up in
+            degraded mode (link restarts only, status hb_degraded=1).
+
+    config TASK_HB_REBOOT_STABLE_MS
+        int "Uptime after which the reboot counter is cleared (ms)"
+        default 3600000
+        range 60000 86400000
+        help
+            Running this long without a heartbeat reboot clears the reboot
+            counter and the degraded flag.
+
 endmenu
