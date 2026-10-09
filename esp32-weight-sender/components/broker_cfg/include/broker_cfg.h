@@ -54,6 +54,7 @@ void broker_cfg_effective(broker_cfg_src_t src, const broker_cfg_rec_t *rec, con
 const char *broker_cfg_src_name(broker_cfg_src_t src);
 uint32_t broker_cfg_crc32(const void *data, size_t len);
 void broker_cfg_wipe(broker_cfg_rec_t *rec);
+void broker_cfg_wipe_bytes(void *p, size_t n);
 
 #ifdef __cplusplus
 }

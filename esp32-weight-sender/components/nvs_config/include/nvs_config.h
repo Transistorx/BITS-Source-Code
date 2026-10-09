@@ -18,7 +18,7 @@
  *
  *   SUFFIX       â†’ produces NVS_KEY_<SUFFIX>, usable as (const char *)
  *   nvs_key_str  â†’ actual key written to flash  (NVS hard limit: 15 chars)
- *   TYPE         â†’ NVS_T_STR | NVS_T_U32 | NVS_T_I32 | NVS_T_FLOAT | NVS_T_BLOB
+ *   TYPE         - NVS_T_STR | NVS_T_U32 | NVS_T_I32 | NVS_T_FLOAT | NVS_T_BLOB
  *   default      â†’ written once on first boot by nvs_config_load_defaults()
  *                  use "" to skip â€” key must be set via MQTT/REPL
  * ============================================================================ */

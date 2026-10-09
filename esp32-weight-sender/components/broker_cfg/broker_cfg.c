@@ -12,9 +12,10 @@ static const char *const s_src_names[] = {
     "kconfig", "nvs", "fallback_absent", "fallback_version", "fallback_crc", "fallback_invalid",
 };
 
-static void wipe_bytes(void *p, size_t n)
+void broker_cfg_wipe_bytes(void *p, size_t n)
 {
     volatile uint8_t *v = (volatile uint8_t *)p;
+    if (p == NULL) return;
     for (size_t i = 0U; i < n; i++) {
         v[i] = 0U;
     }
@@ -23,7 +24,7 @@ static void wipe_bytes(void *p, size_t n)
 void broker_cfg_wipe(broker_cfg_rec_t *rec)
 {
     if (rec != NULL) {
-        wipe_bytes(rec, sizeof(*rec));
+        broker_cfg_wipe_bytes(rec, sizeof(*rec));
     }
 }
 

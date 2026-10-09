@@ -383,9 +383,9 @@ static void mqtt_pub_task(void *arg)
         }
     }
     if (!mqtt_link_handoff_task_exit(&s_pub_handoff)) {
-        atomic_store(&s_pub_stuck, false);
         ESP_LOGW(TAG, "pub task exited after stop gave up; finishing teardown reason=MQTT_STOP_LATE_EXIT");
         (void)link_teardown();
+        atomic_store(&s_pub_stuck, false);
     }
     vTaskDelete(NULL);
 }
@@ -411,6 +411,9 @@ esp_err_t mqtt_link_stop(void)
     if (!mqtt_link_handoff_wait(&s_pub_handoff, MQTT_STOP_TASK_WAIT_MS)) {
         atomic_store(&s_pub_stuck, true);
         atomic_fetch_add(&s_stop_pub_stuck, 1U);
+        if (mqtt_link_lc_state(&s_lc) != MQTT_LC_STOPPING || atomic_load(&s_teardown_pending)) {
+            atomic_store(&s_pub_stuck, false);
+        }
         ESP_LOGE(TAG, "pub task did not exit in %ums; teardown deferred to it reason=MQTT_STOP_PUB_STUCK",
                  (unsigned)MQTT_STOP_TASK_WAIT_MS);
         return ESP_ERR_TIMEOUT;
@@ -463,7 +466,7 @@ static void resolve_broker_cfg(void)
         ESP_LOGW(TAG, "mqtt_cfg read failed: %s", esp_err_to_name(err));
         src = BROKER_CFG_SRC_FALLBACK_INVALID;
     }
-    memset(blob, 0, sizeof(blob));
+    broker_cfg_wipe_bytes(blob, sizeof(blob));
     broker_cfg_effective(src, &s_cfg_rec, CONFIG_MQTT_LINK_BROKER_URI, CONFIG_MQTT_LINK_USERNAME,
                          CONFIG_MQTT_LINK_PASSWORD, &s_cfg_eff);
     s_cfg_src = s_cfg_eff.src;
@@ -499,6 +502,7 @@ esp_err_t mqtt_link_start(void)
         ESP_LOGI(TAG, "deferred teardown completed");
     }
     if (mqtt_link_lc_state(&s_lc) != MQTT_LC_IDLE) return ESP_ERR_INVALID_STATE;
+    atomic_store(&s_pub_stuck, false);
     resolve_broker_cfg();
     if (s_cfg_eff.uri[0] == '\0') {
         ESP_LOGW(TAG, "MQTT OFF reason=MQTT_CFG_EMPTY source=%s", broker_cfg_src_name(s_cfg_src));
