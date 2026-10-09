@@ -1,5 +1,12 @@
+set(WMQ_EXTRA_REQUIRES "")
+foreach(wmq_comp broker_cfg task_hb)
+    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../../../components/${wmq_comp}")
+        list(APPEND WMQ_EXTRA_REQUIRES ${wmq_comp})
+    endif()
+endforeach()
+
 idf_component_register(
-    SRCS "test_main.c" "test_transport_golden.c" "test_board_pinmap.c" "mock_transport.c" "test_responsiveness.c" "test_mqtt_cmd.c" "test_mqtt_stop.c" "test_mqtt_env.c" "test_log_util.c" "test_diag_channels.c" "test_reader_safety.c"
+    SRCS "test_main.c" "test_transport_golden.c" "test_board_pinmap.c" "mock_transport.c" "test_responsiveness.c" "test_mqtt_cmd.c" "test_mqtt_stop.c" "test_mqtt_env.c" "test_log_util.c" "test_diag_channels.c" "test_reader_safety.c" "test_weight_mqtt.c"
     INCLUDE_DIRS
         "."
         # Frozen RS232 golden vectors, captured before the transport
@@ -14,5 +21,5 @@ idf_component_register(
     # scale_hal is exercised through a mock transport, so the reader's
     # framing and parser dispatch run in the suite without a UART.
     REQUIRES weight_source websocket_server interfaces provisioning
-             scale_hal scale_protocols freertos board scale_manager mqtt_link_core scale_cmd esp_timer log_util
+             scale_hal scale_protocols freertos board scale_manager mqtt_link_core scale_cmd esp_timer log_util ${WMQ_EXTRA_REQUIRES}
 )

@@ -1,5 +1,6 @@
 #include "test_harness.h"
 #include "test_diag_channels.h"
+#include "test_weight_mqtt.h"
 #include "mock_transport.h"
 #include "golden_frames.h"
 #include "cas_ci2001_parser.h"
@@ -92,4 +93,5 @@ void test_responsiveness_run(void)
 
     /* Per-channel diagnostics, CH1 selection and cross-channel isolation. */
     test_diag_channels_run(manager);
+    test_weight_mqtt_run(manager);
 }
