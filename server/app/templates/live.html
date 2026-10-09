@@ -13,8 +13,8 @@
   <main class="page">
     <h1 class="page-title">Live Monitor</h1>
     <div class="live-banner" role="note">
-      <strong>Read-only monitoring.</strong> This page only reads telemetry —
-      it never sends commands to the controller and never modifies data.
+      <strong>Monitoring page.</strong> Telemetry is read-only. The only commands this page can
+      send are ZERO and TARE to a whitelisted sender channel, and only when you press the button.
     </div>
 
     <div id="live-root">
@@ -23,6 +23,7 @@
   </main>
 
   <script src="/static/js/common.js?v={{ asset_v }}"></script>
+  <script src="/static/js/live_ws.js?v={{ asset_v }}"></script>
   <script src="/static/js/live.js?v={{ asset_v }}"></script>
 </body>
 </html>

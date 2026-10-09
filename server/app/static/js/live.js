@@ -1,7 +1,7 @@
 /* ============================================================
-   Live monitor (/live) — uses the live SSE stream (/api/v1/live/events) with a poll fallback and a DB poll for run samples.
-   Read-only: never sends control commands.
-   Requires: common.js (window.Telemetry), Chart.js.
+   Live monitor (/live) — sender weights and ZERO/TARE over the live WebSocket (live_ws.js);
+   controller panel from the live SSE stream with a poll fallback; DB poll for run samples.
+   Requires: common.js (window.Telemetry), live_ws.js, Chart.js.
    ============================================================ */
 (function () {
   'use strict';
@@ -19,6 +19,21 @@
   var failCount = 0;
   var liveSnapshot = null;
   var stopLive = null;
+
+  var STALE_MS = 1000;
+  var OFFLINE_MS = 3000;
+  var link = 'connecting';
+  var broker = 'UNKNOWN';
+  var senders = {};
+  var rows = {};
+  var inflightCmd = {};
+  var cmdMsg = {};
+  var wsClient = null;
+  var wsRaf = null;
+  var wsTimer = null;
+  var rowsHost = null;
+  var wsFailures = 0;
+  var wsNote = '';
 
   var LAYOUT =
     '<div class="live-grid">' +
@@ -58,6 +73,11 @@
           '<div class="chart-placeholder" id="live-chart-ph">Waiting for samples…</div>' +
         '</div>' +
       '</div>' +
+    '</div>' +
+    '<div class="live-panel mt-3" id="ws-panel">' +
+      '<h3>Sender channels</h3>' +
+      '<div id="ws-status" class="small muted" role="status" aria-live="polite"></div>' +
+      '<div id="ws-senders"></div>' +
     '</div>';
 
   function ensureLayout() {
@@ -206,6 +226,199 @@
     });
   }
 
+  /* ---------- sender channels over WebSocket ---------- */
+
+  function hasSenders() {
+    return Object.keys(senders).length > 0;
+  }
+
+  function effectiveAge(s, c, now) {
+    var base = c && c.weight_age_ms != null ? Number(c.weight_age_ms) : Number(s.age_ms);
+    return base + (now - s.rxAt);
+  }
+
+  function rowFor(host, deviceId, ch) {
+    var key = deviceId + '|' + ch;
+    if (rows[key]) { return rows[key]; }
+    var el = document.createElement('div');
+    el.className = 'live-rows ws-row';
+    var name = document.createElement('div');
+    name.textContent = deviceId + ' / ' + ch;
+    var weight = document.createElement('div');
+    weight.className = 'stat-value';
+    var meta = document.createElement('div');
+    meta.className = 'small';
+    var btns = document.createElement('div');
+    var zero = document.createElement('button');
+    zero.type = 'button'; zero.className = 'btn'; zero.textContent = 'ZERO';
+    var tare = document.createElement('button');
+    tare.type = 'button'; tare.className = 'btn'; tare.textContent = 'TARE';
+    btns.appendChild(zero);
+    btns.appendChild(document.createTextNode(' '));
+    btns.appendChild(tare);
+    var msg = document.createElement('div');
+    msg.className = 'small';
+    msg.setAttribute('role', 'status');
+    [name, weight, meta, btns, msg].forEach(function (n) { el.appendChild(n); });
+    zero.addEventListener('click', function () { sendCommand(deviceId, ch, 'ZERO'); });
+    tare.addEventListener('click', function () { sendCommand(deviceId, ch, 'TARE'); });
+    host.appendChild(el);
+    rows[key] = { el: el, weight: weight, meta: meta, zero: zero, tare: tare, msg: msg };
+    return rows[key];
+  }
+
+  function renderWs() {
+    wsRaf = null;
+    if (wsTimer !== null) { clearTimeout(wsTimer); wsTimer = null; }
+    var host = T.el('ws-senders');
+    var status = T.el('ws-status');
+    if (!host) { return; }
+    if (host !== rowsHost) { rows = {}; rowsHost = host; }
+    var linkText = link === 'open' ? 'WebSocket connected' :
+      (link === 'connecting' ? 'WebSocket connecting...' : 'WebSocket disconnected - reconnecting');
+    if (status) {
+      status.textContent = linkText + ' | broker: ' + broker +
+        (wsFailures >= 3 && link !== 'open' ? ' | controller panel on SSE' : '') +
+        (wsNote ? ' | ' + wsNote : '');
+    }
+    var now = performance.now();
+    var next = Infinity;
+    Object.keys(senders).sort().forEach(function (id) {
+      var s = senders[id];
+      var devAge = Number(s.age_ms) + (now - s.rxAt);
+      var offline = link !== 'open' || s.online === false || devAge >= OFFLINE_MS;
+      (s.channels || []).forEach(function (c) {
+        var key = id + '|' + c.channel_id;
+        var r = rowFor(host, id, c.channel_id);
+        var age = effectiveAge(s, c, now);
+        var stale = !offline && (age > STALE_MS || !c.weight_valid);
+        var showValue = !offline && c.weight_valid && c.weight_g != null && age <= OFFLINE_MS;
+        r.weight.textContent = showValue ? (Number(c.weight_g) / 1000).toFixed(3) + ' kg' : 'Unavailable';
+        r.meta.textContent = offline ? 'OFFLINE' :
+          (stale ? 'STALE ' : 'LIVE ') + Math.round(age) + ' ms' + (c.stable ? ' stable' : '');
+        r.el.classList.toggle('ws-stale', stale);
+        r.el.classList.toggle('ws-offline', offline);
+        var busy = !!inflightCmd[key];
+        r.zero.disabled = busy || link !== 'open';
+        r.tare.disabled = busy || link !== 'open';
+        r.msg.textContent = cmdMsg[key] || '';
+        if (!offline) {
+          if (age <= STALE_MS) { next = Math.min(next, STALE_MS - age + 5); }
+          if (devAge < OFFLINE_MS) { next = Math.min(next, OFFLINE_MS - devAge + 5); }
+        }
+      });
+    });
+    if (next !== Infinity) { wsTimer = setTimeout(scheduleWs, Math.max(next, 20)); }
+  }
+
+  function scheduleWs() {
+    if (wsRaf !== null) { return; }
+    wsRaf = requestAnimationFrame(renderWs);
+  }
+
+  function setCmd(key, text, busy) {
+    cmdMsg[key] = text;
+    if (busy) { inflightCmd[key] = true; } else { delete inflightCmd[key]; }
+    scheduleWs();
+  }
+
+  function sendCommand(deviceId, ch, cmd) {
+    var key = deviceId + '|' + ch;
+    if (inflightCmd[key] || !wsClient) { return; }
+    if (!wsClient.sendCmd(deviceId, ch, cmd)) {
+      setCmd(key, cmd + ' not sent: WebSocket not connected', false);
+      return;
+    }
+    setCmd(key, cmd + ' sent - waiting for device', true);
+  }
+
+  function describeAck(m) {
+    var text = String(m.state);
+    if (m.result) { text += ' (' + m.result + ')'; }
+    if (m.reason) { text += ': ' + m.reason; }
+    if (m.weight_g != null) { text += ' @ ' + m.weight_g + ' g'; }
+    if (m.late) { text += ' [late ack]'; }
+    return text;
+  }
+
+  function promptKey() {
+    if (!wsClient || typeof window.prompt !== 'function') { return; }
+    var key = window.prompt('API key required to send commands (kept for this browser tab only):');
+    if (key) { wsClient.sendAuth(key.trim()); }
+  }
+
+  function onCmdState(m) {
+    var key = m.device_id + '|' + m.channel;
+    var reason = m.reason ? ': ' + m.reason : '';
+    if (m.status === 'accepted') {
+      setCmd(key, 'accepted, waiting for device ack', true);
+    } else if (m.status === 'unknown') {
+      setCmd(key, 'OUTCOME UNKNOWN' + reason, true);
+    } else if (m.status === 'refused') {
+      setCmd(key, 'refused' + reason, false);
+      if (m.reason === 'not authenticated') { promptKey(); }
+    } else {
+      setCmd(key, String(m.status) + reason, false);
+    }
+  }
+
+  function onSender(m) {
+    if (!m.device_id) { return; }
+    var cur = senders[m.device_id];
+    if (cur && typeof cur.revision === 'number' && typeof m.revision === 'number' &&
+        m.revision < cur.revision) { return; }
+    senders[m.device_id] = {
+      channels: m.channels || [], age_ms: Number(m.age_ms) || 0, online: m.online,
+      revision: m.revision, rxAt: performance.now()
+    };
+    ensureLayout();
+    scheduleWs();
+  }
+
+  function onSnapshot(m) {
+    var snap = m.senders || {};
+    var fresh = {};
+    var now = performance.now();
+    Object.keys(snap).forEach(function (id) {
+      var v = snap[id] || {};
+      fresh[id] = { channels: v.channels || [], age_ms: Number(v.age_ms) || 0, online: v.online,
+        revision: m.revision, rxAt: now };
+    });
+    senders = fresh;
+    if (hasSenders()) { ensureLayout(); }
+    scheduleWs();
+  }
+
+  function startWs() {
+    if (typeof window.connectLiveWs !== 'function' || typeof WebSocket === 'undefined') { return; }
+    wsClient = window.connectLiveWs({
+      onSnapshot: onSnapshot,
+      onSender: onSender,
+      onBroker: function (m) { broker = String(m.state); scheduleWs(); },
+      onCmdState: onCmdState,
+      onCmdAck: function (m) { setCmd(m.device_id + '|' + m.channel, describeAck(m), false); },
+      onAuth: function () {
+        wsNote = 'authenticated for commands';
+        scheduleWs();
+      },
+      onError: function (m) {
+        wsNote = 'server error ' + m.code + ': ' + m.message;
+        scheduleWs();
+      },
+      onLink: function (state, failures) {
+        link = state;
+        wsFailures = failures || 0;
+        if (state !== 'open') {
+          Object.keys(inflightCmd).forEach(function (k) {
+            cmdMsg[k] = 'connection lost; outcome unknown';
+            delete inflightCmd[k];
+          });
+        }
+        scheduleWs();
+      }
+    });
+  }
+
   function showNoRuns() {
     if (!root) { return; }
     if (emptyShown) { return; } /* don't re-render the same empty state every tick */
@@ -227,7 +440,7 @@
       var data = await T.apiGet('/live');
       failCount = 0;
       if (!data.active_run && (!data.samples || data.samples.length === 0) && !data.last_sample) {
-        if (liveSnapshot && liveSnapshot.controller) renderLiveWeight(); else showNoRuns();
+        if ((liveSnapshot && liveSnapshot.controller) || hasSenders()) { ensureLayout(); renderLiveWeight(); scheduleWs(); } else { showNoRuns(); }
       } else {
         if (!layoutBuilt) { ensureLayout(); }
         render(data);
@@ -258,12 +471,14 @@
     T.applyChartDefaults();
     T.startHealthIndicator();
     stopLive = T.subscribeLive(function (data) { liveSnapshot = data; renderLiveWeight(); });
+    startWs();
     poll();
     pollTimer = T.visibleInterval(poll, POLL_MS);
     window.addEventListener('beforeunload', function () {
       if (pollTimer) { pollTimer(); }
       chart = T.destroyChart(chart);
       if (stopLive) stopLive();
+      if (wsClient) wsClient.close();
     });
   }
 

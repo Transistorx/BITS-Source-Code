@@ -1111,3 +1111,7 @@ h1, h2, h3, p { overflow-wrap: anywhere; }
   #results-table td:nth-child(10)::before { content: 'Duration'; }
 }
 
+
+.ws-row { padding: 8px 0; border-top: 1px solid var(--line, #2a3340); }
+.ws-row.ws-stale { opacity: 0.55; }
+.ws-row.ws-offline { opacity: 0.35; }
