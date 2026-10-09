@@ -154,19 +154,20 @@ void mqtt_link_weight_frame(const mqtt_link_weight_t *w, uint32_t now_ms)
     mqtt_link_weight_t f = *w;
     f.scale_id = s_scale_id;
     w = &f;
-    if (mqtt_link_wgate_new_frame(&s_wgate, w->src_uart, w->cas_seq)) {
+    mqtt_link_wpub_t step = mqtt_link_wgate_step(&s_wgate, w->src_uart, w->cas_seq, now_ms,
+                                                 MQTT_LINK_WEIGHT_HB_PERIOD_MS);
+    if (step == MQTT_LINK_WPUB_NONE) return;
+    if (step == MQTT_LINK_WPUB_FRAME) {
         size_t n = mqtt_link_weight_json(json, sizeof(json), mqtt_link_boot_id(), s_wgate.seq_ctl,
                                          w, false);
         if (n != 0U && weight_put(MQTT_LINK_WEIGHT_SLOT_CTL, MQTT_SUFFIX_WEIGHT_CTL, json, now_ms)) {
             s_wgate.seq_ctl++;
         }
     }
-    if (mqtt_link_wgate_tel_due(&s_wgate, now_ms, MQTT_LINK_WEIGHT_TEL_PERIOD_MS)) {
-        size_t n = mqtt_link_weight_json(json, sizeof(json), mqtt_link_boot_id(), s_wgate.seq_tel,
-                                         w, true);
-        if (n != 0U && weight_put(MQTT_LINK_WEIGHT_SLOT_TEL, MQTT_SUFFIX_WEIGHT_TEL, json, now_ms)) {
-            s_wgate.seq_tel++;
-        }
+    size_t tn = mqtt_link_weight_json(json, sizeof(json), mqtt_link_boot_id(), s_wgate.seq_tel, w,
+                                      true);
+    if (tn != 0U && weight_put(MQTT_LINK_WEIGHT_SLOT_TEL, MQTT_SUFFIX_WEIGHT_TEL, json, now_ms)) {
+        s_wgate.seq_tel++;
     }
 }
 
@@ -285,7 +286,7 @@ static void mqtt_pub_task(void *arg)
     while (mqtt_link_lc_running(&s_lc)) {
         uint32_t poll_ms = (uint32_t)(esp_timer_get_time() / 1000);
         bool got = mqtt_link_queue_next(&s_queues, &item, MQTT_POLL_MS, poll_ms,
-                                        MQTT_LINK_WEIGHT_TEL_PERIOD_MS);
+                                        MQTT_LINK_WEIGHT_HB_PERIOD_MS);
 
         if (atomic_exchange(&s_evt_connected, false)) {
             attempt = 0U;

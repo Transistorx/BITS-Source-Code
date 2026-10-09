@@ -140,10 +140,11 @@ size_t mqtt_link_weight_json(char *out, size_t cap, const char *boot_id, uint32_
     }
     int n = snprintf(out, cap,
                      "{\"schema_version\":1,\"boot_id\":\"%s\",%s\"seq\":%lu,\"uptime_ms\":%lu,"
-                     "\"scale_id\":\"%s\",\"src_uart\":\"UART%u\",\"weight_g\":%ld,\"stable\":%s,\"age_ms\":%lu,"
-                     "\"cas_seq\":%lu,\"source\":\"%s\"}",
+                     "\"scale_id\":\"%s\",\"channel\":\"CH%u\",\"src_uart\":\"UART%u\",\"weight_g\":%ld,"
+                     "\"stable\":%s,\"age_ms\":%lu,\"cas_seq\":%lu,\"source\":\"%s\"}",
                      boot_id, mid, (unsigned long)seq, (unsigned long)w->uptime_ms,
-                     w->scale_id, (unsigned)w->src_uart, (long)w->weight_g, w->stable ? "true" : "false",
+                     w->scale_id, (unsigned)w->src_uart, (unsigned)w->src_uart, (long)w->weight_g,
+                     w->stable ? "true" : "false",
                      (unsigned long)w->age_ms, (unsigned long)w->cas_seq, w->source);
     /* weight/ctl is capped at 256 B; the telemetry copy (message_id) is per section 7. */
     size_t limit = with_message_id ? MQTT_LINK_PAYLOAD_MAX : MQTT_LINK_ENV_MAX;
@@ -166,12 +167,30 @@ bool mqtt_link_wgate_new_frame(mqtt_link_wgate_t *g, uint8_t src_uart, uint32_t 
     return true;
 }
 
-bool mqtt_link_wgate_tel_due(mqtt_link_wgate_t *g, uint32_t now_ms, uint32_t period_ms)
+static void wgate_hb_stamp(mqtt_link_wgate_t *g, uint32_t now_ms)
 {
-    if (g->have_tel && (uint32_t)(now_ms - g->last_tel_ms) < period_ms) return false;
     g->have_tel = true;
     g->last_tel_ms = now_ms;
+}
+
+bool mqtt_link_wgate_hb_due(mqtt_link_wgate_t *g, uint32_t now_ms, uint32_t period_ms)
+{
+    if (g == NULL) return false;
+    if (g->have_tel && (uint32_t)(now_ms - g->last_tel_ms) < period_ms) return false;
+    wgate_hb_stamp(g, now_ms);
     return true;
+}
+
+mqtt_link_wpub_t mqtt_link_wgate_step(mqtt_link_wgate_t *g, uint8_t src_uart, uint32_t cas_seq,
+                                      uint32_t now_ms, uint32_t period_ms)
+{
+    if (g == NULL || (src_uart != 1U && src_uart != 2U)) return MQTT_LINK_WPUB_NONE;
+    if (mqtt_link_wgate_new_frame(g, src_uart, cas_seq)) {
+        wgate_hb_stamp(g, now_ms);
+        return MQTT_LINK_WPUB_FRAME;
+    }
+    if (mqtt_link_wgate_hb_due(g, now_ms, period_ms)) return MQTT_LINK_WPUB_HEARTBEAT;
+    return MQTT_LINK_WPUB_NONE;
 }
 
 void mqtt_link_uri_redact(char *out, size_t cap, const char *uri)

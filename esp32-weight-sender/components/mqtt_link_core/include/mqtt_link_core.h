@@ -69,7 +69,7 @@ typedef struct {
 #define MQTT_SUFFIX_WEIGHT_CTL "weight/ctl"
 #define MQTT_SUFFIX_WEIGHT_TEL "telemetry/weight"
 #define MQTT_LINK_BOOT_ID_LEN  8U
-#define MQTT_LINK_WEIGHT_TEL_PERIOD_MS 500U  /* reduced stream, 2 Hz */
+#define MQTT_LINK_WEIGHT_HB_PERIOD_MS 1000U
 
 /* 8 lowercase hex chars from a random word (esp_random at the call site). */
 void mqtt_link_boot_id_fmt(char out[MQTT_LINK_BOOT_ID_LEN + 1U], uint32_t rnd);
@@ -120,8 +120,16 @@ void mqtt_link_wgate_init(mqtt_link_wgate_t *g);
 /* True once per distinct cas_seq per UART (dedupe); marks it seen either way.
  * A src_uart other than 1/2 is never new. */
 bool mqtt_link_wgate_new_frame(mqtt_link_wgate_t *g, uint8_t src_uart, uint32_t cas_seq);
-/* True at most once per period_ms (wrap-safe). */
-bool mqtt_link_wgate_tel_due(mqtt_link_wgate_t *g, uint32_t now_ms, uint32_t period_ms);
+bool mqtt_link_wgate_hb_due(mqtt_link_wgate_t *g, uint32_t now_ms, uint32_t period_ms);
+
+typedef enum {
+    MQTT_LINK_WPUB_NONE = 0,
+    MQTT_LINK_WPUB_FRAME,
+    MQTT_LINK_WPUB_HEARTBEAT
+} mqtt_link_wpub_t;
+
+mqtt_link_wpub_t mqtt_link_wgate_step(mqtt_link_wgate_t *g, uint8_t src_uart, uint32_t cas_seq,
+                                      uint32_t now_ms, uint32_t period_ms);
 
 /* [A-Za-z0-9._-]{1,64}. The topic device id is authoritative on the server. */
 bool mqtt_link_device_id_valid(const char *id);

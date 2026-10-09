@@ -69,9 +69,11 @@ const char *mqtt_link_boot_id(void);
  * before mqtt_link_start(). */
 void mqtt_link_set_identity(const char *fw, const char *role);
 
-/* Offer one valid, real CAS sample. Publishes cas/{dev}/weight/ctl once per new
- * cas_seq (QoS 0, retain=false) and cas/{dev}/telemetry/weight at 2 Hz. Never
- * blocks; drops are counted in the stats. Call only from one task. */
+/* Offer one valid, real CAS sample. Publishes cas/{dev}/weight/ctl and
+ * cas/{dev}/telemetry/weight once per new cas_seq, plus a telemetry/weight
+ * heartbeat every MQTT_LINK_WEIGHT_HB_PERIOD_MS without a new cas_seq (QoS 0,
+ * retain=false). Never blocks; drops are counted in the stats. Call only from
+ * one task and only with WEIGHT_SOURCE_RESULT_REAL samples. */
 void mqtt_link_weight_frame(const mqtt_link_weight_t *w, uint32_t now_ms);
 
 #ifdef __cplusplus

@@ -33,21 +33,32 @@ static mqtt_link_weight_t sample_w(uint32_t cas_seq)
     return w;
 }
 
-/* Minimal publish model of mqtt_link_weight_frame: gate + build + zero-timeout
- * enqueue; the sequence advances only when the enqueue succeeded. */
+static mqtt_link_wpub_t offer_at(mqtt_link_wgate_t *g, mqtt_link_queues_t *q,
+                                 const mqtt_link_weight_t *w, bool valid_real, uint32_t now_ms)
+{
+    char json[MQTT_LINK_PAYLOAD_MAX + 1U];
+    if (!valid_real) return MQTT_LINK_WPUB_NONE;
+    mqtt_link_wpub_t step = mqtt_link_wgate_step(g, w->src_uart, w->cas_seq, now_ms,
+                                                 MQTT_LINK_WEIGHT_HB_PERIOD_MS);
+    if (step == MQTT_LINK_WPUB_NONE) return step;
+    if (step == MQTT_LINK_WPUB_FRAME &&
+        mqtt_link_weight_json(json, sizeof(json), BOOT, g->seq_ctl, w, false) != 0U &&
+        mqtt_link_queue_put_weight(q, MQTT_LINK_WEIGHT_SLOT_CTL, "cas/" DEV "/" MQTT_SUFFIX_WEIGHT_CTL,
+                                   json, now_ms) == MQTT_ENQ_OK) {
+        g->seq_ctl++;
+    }
+    if (mqtt_link_weight_json(json, sizeof(json), BOOT, g->seq_tel, w, true) != 0U &&
+        mqtt_link_queue_put_weight(q, MQTT_LINK_WEIGHT_SLOT_TEL, "cas/" DEV "/" MQTT_SUFFIX_WEIGHT_TEL,
+                                   json, now_ms) == MQTT_ENQ_OK) {
+        g->seq_tel++;
+    }
+    return step;
+}
+
 static bool offer(mqtt_link_wgate_t *g, mqtt_link_queues_t *q, const mqtt_link_weight_t *w,
                   bool valid_real)
 {
-    char json[MQTT_LINK_ENV_MAX + 1U];
-    if (!valid_real) return false; /* weight_tx never calls it for stale/invalid data */
-    if (!mqtt_link_wgate_new_frame(g, w->src_uart, w->cas_seq)) return false;
-    if (mqtt_link_weight_json(json, sizeof(json), BOOT, g->seq_ctl, w, false) == 0U) return false;
-    if (mqtt_link_queue_push_pub(q, "cas/" DEV "/" MQTT_SUFFIX_WEIGHT_CTL, json, 0, false) !=
-        MQTT_ENQ_OK) {
-        return false;
-    }
-    g->seq_ctl++;
-    return true;
+    return offer_at(g, q, w, valid_real, 1000U) == MQTT_LINK_WPUB_FRAME;
 }
 
 void test_mqtt_env_run(void)
@@ -95,7 +106,8 @@ void test_mqtt_env_run(void)
                    strstr(json, "\"scale_id\":\"SCALE1\"") && strstr(json, "\"src_uart\":\"UART1\"") && strstr(json, "\"weight_g\":2500") &&
                    strstr(json, "\"stable\":true") && strstr(json, "\"age_ms\":12") &&
                    strstr(json, "\"cas_seq\":77") && strstr(json, "\"source\":\"CAS_RS485\"") &&
-                   strstr(json, "message_id") == NULL && strstr(json, "channel") == NULL &&
+                   strstr(json, "message_id") == NULL &&
+                   strstr(json, "\"channel\":\"CH1\",\"src_uart\":\"UART1\"") &&
                    strstr(json, "weight1_g") == NULL && strstr(json, "weight2_g") == NULL &&
                    strstr(json, "pump") == NULL,
                "env_ctl_fields");
@@ -127,7 +139,6 @@ void test_mqtt_env_run(void)
                    !mqtt_link_scale_id_valid("a/b"),
                "env_scale_id_validation");
 
-    /* dedupe, retain=false, drop-when-full, sequence */
     mqtt_link_wgate_t g;
     mqtt_link_wgate_init(&g);
     mqtt_link_queues_t q;
@@ -135,33 +146,91 @@ void test_mqtt_env_run(void)
     mqtt_link_weight_t f1 = sample_w(10U);
     test_check(offer(&g, &q, &f1, true), "env_first_frame_published");
     test_check(!offer(&g, &q, &f1, true), "env_same_cas_seq_deduped");
-    test_check(mqtt_link_queue_pending(&q) == 1U && g.seq_ctl == 1U, "env_dedupe_no_extra_enqueue");
+    test_check(mqtt_link_queue_pending(&q) == 2U && g.seq_ctl == 1U && g.seq_tel == 1U,
+               "env_dedupe_no_extra_enqueue");
     mqtt_link_weight_t f2 = sample_w(11U);
-    test_check(offer(&g, &q, &f2, true) && g.seq_ctl == 2U, "env_new_cas_seq_published_seq_increments");
+    test_check(offer(&g, &q, &f2, true) && g.seq_ctl == 2U && g.seq_tel == 2U,
+               "env_new_cas_seq_published_seq_increments");
     mqtt_item_t *it = pvPortMalloc(sizeof(*it));
-    test_check(it != NULL && mqtt_link_queue_next(&q, it, 0, 0U, 1000U) && it->kind == MQTT_ITEM_PUB && it->len <= MQTT_LINK_ENV_MAX &&
+    test_check(it != NULL && mqtt_link_queue_next(&q, it, 0, 1000U, MQTT_LINK_WEIGHT_HB_PERIOD_MS) &&
+                   it->kind == MQTT_ITEM_PUB && it->len <= MQTT_LINK_ENV_MAX &&
                    it->qos == 0 && !it->retain && strcmp(it->topic, "cas/" DEV "/weight/ctl") == 0 &&
-                   strstr(it->data, "\"seq\":0,") != NULL,
+                   strstr(it->data, "\"seq\":1,") != NULL && strstr(it->data, "\"cas_seq\":11,") != NULL,
                "env_ctl_qos0_retain_false_topic");
+    test_check(it != NULL && mqtt_link_queue_next(&q, it, 0, 1000U, MQTT_LINK_WEIGHT_HB_PERIOD_MS) &&
+                   it->qos == 0 && !it->retain && strcmp(it->topic, "cas/" DEV "/telemetry/weight") == 0 &&
+                   strstr(it->data, "\"cas_seq\":11,") != NULL && strstr(it->data, "\"message_id\"") != NULL,
+               "env_tel_every_new_frame_qos0_retain_false_topic");
 
+    uint32_t ow0 = q.weight_overwritten;
     mqtt_link_weight_t f3 = sample_w(12U);
     mqtt_link_weight_t f4 = sample_w(13U);
     mqtt_link_weight_t f5 = sample_w(14U);
-    bool a3 = offer(&g, &q, &f3, true);   /* queue holds f2 + f3: full */
-    bool a4 = offer(&g, &q, &f4, true);   /* dropped */
-    bool a5 = offer(&g, &q, &f5, true);   /* dropped */
-    test_check(a3 && !a4 && !a5 && q.pub_dropped_full >= 2U, "env_full_queue_drops_and_counts");
-    test_check(g.seq_ctl == 3U, "env_seq_not_consumed_by_drop");
+    bool a3 = offer(&g, &q, &f3, true);
+    bool a4 = offer(&g, &q, &f4, true);
+    bool a5 = offer(&g, &q, &f5, true);
+    test_check(a3 && a4 && a5 && q.weight_overwritten - ow0 == 4U && q.pub_dropped_full == 0U &&
+                   mqtt_link_queue_pending(&q) == 2U,
+               "env_full_mailbox_overwrites_and_counts");
+    test_check(it != NULL && g.seq_ctl == 5U && g.seq_tel == 5U &&
+                   mqtt_link_queue_next(&q, it, 0, 1000U, MQTT_LINK_WEIGHT_HB_PERIOD_MS) &&
+                   strstr(it->data, "\"seq\":4,") != NULL && strstr(it->data, "\"cas_seq\":14,") != NULL,
+               "env_latest_frame_wins_seq_gap_shows_overwrite");
+    if (it != NULL) (void)mqtt_link_queue_next(&q, it, 0, 1000U, MQTT_LINK_WEIGHT_HB_PERIOD_MS);
 
-    /* No publish for stale/invalid data */
     mqtt_link_wgate_t g2;
     mqtt_link_wgate_init(&g2);
     mqtt_link_weight_t fz = sample_w(99U);
     fz.weight_g = 0;
-    test_check(!offer(&g2, &q, &fz, false) && g2.seq_ctl == 0U && !g2.have_cas_seq[0],
+    test_check(!offer(&g2, &q, &fz, false) && g2.seq_ctl == 0U && g2.seq_tel == 0U && !g2.have_cas_seq[0] &&
+                   !g2.have_tel && mqtt_link_queue_pending(&q) == 0U,
                "env_no_publish_for_stale_or_invalid_frame");
 
-    /* Single seq counter across both UARTs; dedupe by cas_seq stays per UART. */
+    mqtt_link_wgate_t g6;
+    mqtt_link_wgate_init(&g6);
+    mqtt_link_weight_t h = sample_w(50U);
+    h.uptime_ms = 10000U;
+    test_check(offer_at(&g6, &q, &h, true, 10000U) == MQTT_LINK_WPUB_FRAME, "env_hb_frame_first");
+    while (it != NULL && mqtt_link_queue_next(&q, it, 0, 10000U, MQTT_LINK_WEIGHT_HB_PERIOD_MS)) {
+    }
+    h.uptime_ms = 10999U;
+    h.age_ms = 1011U;
+    test_check(offer_at(&g6, &q, &h, true, 10999U) == MQTT_LINK_WPUB_NONE && mqtt_link_queue_pending(&q) == 0U,
+               "env_hb_not_before_period");
+    h.uptime_ms = 11000U;
+    h.age_ms = 1012U;
+    test_check(offer_at(&g6, &q, &h, true, 11000U) == MQTT_LINK_WPUB_HEARTBEAT &&
+                   mqtt_link_queue_pending(&q) == 1U && g6.seq_ctl == 1U && g6.seq_tel == 2U,
+               "env_hb_tel_only_same_cas_seq");
+    test_check(it != NULL && mqtt_link_queue_next(&q, it, 0, 11000U, MQTT_LINK_WEIGHT_HB_PERIOD_MS) &&
+                   strcmp(it->topic, "cas/" DEV "/telemetry/weight") == 0 &&
+                   strstr(it->data, "\"uptime_ms\":11000,") && strstr(it->data, "\"age_ms\":1012,") &&
+                   strstr(it->data, "\"cas_seq\":50,") && strstr(it->data, "\"seq\":1,"),
+               "env_hb_payload_advances_uptime_and_age");
+    h.cas_seq = 51U;
+    h.age_ms = 5U;
+    test_check(offer_at(&g6, &q, &h, true, 11400U) == MQTT_LINK_WPUB_FRAME && g6.last_tel_ms == 11400U,
+               "env_hb_timer_reset_by_new_frame");
+    while (it != NULL && mqtt_link_queue_next(&q, it, 0, 11400U, MQTT_LINK_WEIGHT_HB_PERIOD_MS)) {
+    }
+    test_check(offer_at(&g6, &q, &h, true, 12000U) == MQTT_LINK_WPUB_NONE &&
+                   offer_at(&g6, &q, &h, true, 12400U) == MQTT_LINK_WPUB_HEARTBEAT,
+               "env_hb_due_one_period_after_last_tel");
+    while (it != NULL && mqtt_link_queue_next(&q, it, 0, 12400U, MQTT_LINK_WEIGHT_HB_PERIOD_MS)) {
+    }
+    test_check(offer_at(&g6, &q, &h, false, 20000U) == MQTT_LINK_WPUB_NONE && mqtt_link_queue_pending(&q) == 0U &&
+                   g6.last_tel_ms == 12400U,
+               "env_hb_silent_when_not_real");
+    uint32_t st0 = q.weight_dropped_stale;
+    test_check(it != NULL && offer_at(&g6, &q, &h, true, 13400U) == MQTT_LINK_WPUB_HEARTBEAT &&
+                   !mqtt_link_queue_next(&q, it, 0, 14401U, MQTT_LINK_WEIGHT_HB_PERIOD_MS) &&
+                   q.weight_dropped_stale - st0 == 1U,
+               "env_hb_item_older_than_period_dropped_stale");
+    test_check(mqtt_link_wgate_step(&g6, 3U, 99U, 30000U, MQTT_LINK_WEIGHT_HB_PERIOD_MS) == MQTT_LINK_WPUB_NONE &&
+                   mqtt_link_wgate_step(NULL, 1U, 99U, 30000U, MQTT_LINK_WEIGHT_HB_PERIOD_MS) == MQTT_LINK_WPUB_NONE &&
+                   g6.last_tel_ms == 13400U,
+               "env_hb_step_rejects_bad_uart_and_null");
+
     mqtt_link_wgate_t g5;
     mqtt_link_wgate_init(&g5);
     mqtt_link_queues_t q5;
@@ -170,16 +239,17 @@ void test_mqtt_env_run(void)
     mqtt_link_weight_t u2 = sample_w(1U);
     u2.src_uart = 2U;
     mqtt_item_t *it5 = pvPortMalloc(sizeof(*it5));
-    test_check(offer(&g5, &q5, &u1, true) && offer(&g5, &q5, &u2, true) && g5.seq_ctl == 2U &&
-                   it5 != NULL && mqtt_link_queue_next(&q5, it5, 0, 0U, 1000U) && strstr(it5->data, "\"seq\":0,") &&
-                   strstr(it5->data, "\"src_uart\":\"UART1\"") &&
-                   mqtt_link_queue_next(&q5, it5, 0, 0U, 1000U) && strstr(it5->data, "\"seq\":1,") &&
-                   strstr(it5->data, "\"src_uart\":\"UART2\""),
-               "env_single_seq_counter_across_uarts");
+    bool o1 = offer(&g5, &q5, &u1, true);
+    bool p1 = it5 != NULL && mqtt_link_queue_next(&q5, it5, 0, 1000U, MQTT_LINK_WEIGHT_HB_PERIOD_MS) &&
+              strstr(it5->data, "\"seq\":0,") && strstr(it5->data, "\"src_uart\":\"UART1\"");
+    bool o2 = offer(&g5, &q5, &u2, true);
+    bool p2 = it5 != NULL && mqtt_link_queue_next(&q5, it5, 0, 1000U, MQTT_LINK_WEIGHT_HB_PERIOD_MS) &&
+              strstr(it5->data, "\"seq\":1,") && strstr(it5->data, "\"channel\":\"CH2\"") &&
+              strstr(it5->data, "\"src_uart\":\"UART2\"");
+    test_check(o1 && p1 && o2 && p2 && g5.seq_ctl == 2U, "env_single_seq_counter_across_uarts");
     vPortFree(it5);
     mqtt_link_queues_deinit(&q5);
 
-    /* Dedupe is per UART: equal cas_seq on UART1 and UART2 are both new. */
     mqtt_link_wgate_t g4;
     mqtt_link_wgate_init(&g4);
     test_check(mqtt_link_wgate_new_frame(&g4, 1U, 5U) && mqtt_link_wgate_new_frame(&g4, 2U, 5U) &&
@@ -189,13 +259,13 @@ void test_mqtt_env_run(void)
     vPortFree(it);
     mqtt_link_queues_deinit(&q);
 
-    /* telemetry/weight reduced stream */
     mqtt_link_wgate_t g3;
     mqtt_link_wgate_init(&g3);
-    test_check(mqtt_link_wgate_tel_due(&g3, 1000U, 500U) && !mqtt_link_wgate_tel_due(&g3, 1100U, 500U) &&
-                   !mqtt_link_wgate_tel_due(&g3, 1499U, 500U) && mqtt_link_wgate_tel_due(&g3, 1500U, 500U),
+    test_check(mqtt_link_wgate_hb_due(&g3, 1000U, 500U) && !mqtt_link_wgate_hb_due(&g3, 1100U, 500U) &&
+                   !mqtt_link_wgate_hb_due(&g3, 1499U, 500U) && mqtt_link_wgate_hb_due(&g3, 1500U, 500U),
                "env_telemetry_weight_rate_limited");
-    test_check(mqtt_link_wgate_tel_due(&g3, 100U, 500U), "env_telemetry_rate_wrap_safe");
+    test_check(mqtt_link_wgate_hb_due(&g3, 100U, 500U), "env_telemetry_rate_wrap_safe");
+    test_check(!mqtt_link_wgate_hb_due(NULL, 100U, 500U), "env_hb_due_null_safe");
 
     /* backoff jitter: never below base, never above cap */
     bool ok = true;
