@@ -16,6 +16,7 @@ typedef enum {
     NVS_T_U32   = 1,   /* nvs_set_u32  / nvs_get_u32          */
     NVS_T_I32   = 2,   /* nvs_set_i32  / nvs_get_i32          */
     NVS_T_FLOAT = 3,   /* nvs_set_blob / nvs_get_blob (4 B)   */
+    NVS_T_BLOB  = 4,
 } nvs_val_type_t;
 
 typedef struct {
@@ -203,6 +204,76 @@ esp_err_t nvs_config_set_float(const char *key, float value)
     return nvs_commit(s_handle);
 }
 
+esp_err_t nvs_config_get_blob(const char *key, void *buf, size_t *len)
+{
+    esp_err_t ret = ESP_ERR_INVALID_ARG;
+
+    if (!s_initialized || (key == NULL) || (len == NULL)) {
+        goto cleanup;
+    }
+    if ((buf == NULL) && (*len != 0U)) {
+        goto cleanup;
+    }
+    if (*len > NVS_CONFIG_BLOB_MAX) {
+        *len = NVS_CONFIG_BLOB_MAX;
+    }
+    ret = nvs_get_blob(s_handle, key, buf, len);
+    if ((ret != ESP_OK) && (ret != ESP_ERR_NVS_NOT_FOUND) && (ret != ESP_ERR_NVS_INVALID_LENGTH)) {
+        ESP_LOGW(TAG, "get_blob '%s': %s", key, esp_err_to_name(ret));
+    }
+
+cleanup:
+    return ret;
+}
+
+esp_err_t nvs_config_set_blob(const char *key, const void *buf, size_t len)
+{
+    esp_err_t ret = ESP_ERR_INVALID_ARG;
+
+    if (!s_initialized || (key == NULL) || (buf == NULL) || (len == 0U) || (len > NVS_CONFIG_BLOB_MAX)) {
+        goto cleanup;
+    }
+    ret = nvs_set_blob(s_handle, key, buf, len);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_set_blob '%s' failed: %s", key, esp_err_to_name(ret));
+        goto cleanup;
+    }
+    ret = nvs_commit(s_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "commit '%s' failed: %s", key, esp_err_to_name(ret));
+        goto cleanup;
+    }
+    ESP_LOGI(TAG, "Stored blob '%s' (%u B) in NVS", key, (unsigned)len);
+
+cleanup:
+    return ret;
+}
+
+esp_err_t nvs_config_erase_key(const char *key)
+{
+    esp_err_t ret = ESP_ERR_INVALID_ARG;
+
+    if (!s_initialized || (key == NULL)) {
+        goto cleanup;
+    }
+    ret = nvs_erase_key(s_handle, key);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        ret = ESP_OK;
+        goto cleanup;
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_erase_key '%s' failed: %s", key, esp_err_to_name(ret));
+        goto cleanup;
+    }
+    ret = nvs_commit(s_handle);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Erased '%s' from NVS", key);
+    }
+
+cleanup:
+    return ret;
+}
+
 /* --------------------------------------------------------------------------
  * Private helpers for schema-driven operations
  * -------------------------------------------------------------------------- */
@@ -233,6 +304,11 @@ static bool key_exists_typed(const nvs_schema_entry_t *e)
             size_t sz = sizeof(float);
             ret = nvs_get_blob(s_handle, e->key, &v, &sz);
             return (ret == ESP_OK);
+        }
+        case NVS_T_BLOB: {
+            size_t sz = 0U;
+            ret = nvs_get_blob(s_handle, e->key, NULL, &sz);
+            return ((ret == ESP_OK) || (ret == ESP_ERR_NVS_INVALID_LENGTH));
         }
         default:
             return false;
@@ -271,6 +347,8 @@ static esp_err_t write_from_str(const nvs_schema_entry_t *e,
             ret = nvs_set_blob(s_handle, e->key, &v, sizeof(float));
             break;
         }
+        case NVS_T_BLOB:
+            return ESP_ERR_NOT_SUPPORTED;
         default:
             return ESP_ERR_INVALID_ARG;
     }

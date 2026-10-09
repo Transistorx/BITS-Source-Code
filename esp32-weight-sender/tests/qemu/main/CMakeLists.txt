@@ -6,7 +6,7 @@ foreach(wmq_comp broker_cfg task_hb)
 endforeach()
 
 idf_component_register(
-    SRCS "test_main.c" "test_transport_golden.c" "test_board_pinmap.c" "mock_transport.c" "test_responsiveness.c" "test_mqtt_cmd.c" "test_mqtt_stop.c" "test_mqtt_env.c" "test_log_util.c" "test_diag_channels.c" "test_reader_safety.c" "test_weight_mqtt.c" "test_weight_mqtt_fix.c" "test_mqtt_stats.c"
+    SRCS "test_main.c" "test_transport_golden.c" "test_board_pinmap.c" "mock_transport.c" "test_responsiveness.c" "test_mqtt_cmd.c" "test_mqtt_stop.c" "test_mqtt_env.c" "test_log_util.c" "test_diag_channels.c" "test_reader_safety.c" "test_weight_mqtt.c" "test_weight_mqtt_fix.c" "test_mqtt_stats.c" "test_broker_cfg.c"
     INCLUDE_DIRS
         "."
         # Frozen RS232 golden vectors, captured before the transport
@@ -21,5 +21,5 @@ idf_component_register(
     # scale_hal is exercised through a mock transport, so the reader's
     # framing and parser dispatch run in the suite without a UART.
     REQUIRES weight_source websocket_server interfaces provisioning
-             scale_hal scale_protocols freertos board scale_manager mqtt_link_core scale_cmd esp_timer log_util ${WMQ_EXTRA_REQUIRES}
+             scale_hal scale_protocols freertos board scale_manager mqtt_link_core scale_cmd esp_timer log_util nvs_config ${WMQ_EXTRA_REQUIRES}
 )

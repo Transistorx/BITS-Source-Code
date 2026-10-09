@@ -22,6 +22,7 @@
 #include "provisioning.h"
 #include "scale_types.h"
 #include "test_board_pinmap.h"
+#include "test_broker_cfg.h"
 #include "test_harness.h"
 #include "test_log_util.h"
 #include "test_mqtt_cmd.h"
@@ -462,6 +463,7 @@ void app_main(void)
     test_mqtt_stop_run();
     test_mqtt_env_run();
     test_weight_mqtt_fix_run();
+    test_broker_cfg_run();
 
     /* ---- Serial-log policy helpers (change detector, rate limiter, health line) ---- */
     test_log_util_run();

@@ -18,7 +18,7 @@
  *
  *   SUFFIX       â†’ produces NVS_KEY_<SUFFIX>, usable as (const char *)
  *   nvs_key_str  â†’ actual key written to flash  (NVS hard limit: 15 chars)
- *   TYPE         â†’ NVS_T_STR | NVS_T_U32 | NVS_T_I32 | NVS_T_FLOAT
+ *   TYPE         â†’ NVS_T_STR | NVS_T_U32 | NVS_T_I32 | NVS_T_FLOAT | NVS_T_BLOB
  *   default      â†’ written once on first boot by nvs_config_load_defaults()
  *                  use "" to skip â€” key must be set via MQTT/REPL
  * ============================================================================ */
@@ -34,7 +34,8 @@
     X(SCALE_ID,    "scale_id",      NVS_T_STR,   "SCALE1")                                      \
     /* Sender only: which RS-485 channel carries the scale. 0 = use the Kconfig  */                 \
     /* default (WEIGHT_DEMO_SCALE_ACTIVE_CHANNEL), 1 = CH1/UART1, 2 = CH2/UART2. */                 \
-    X(SCALE_CH,    "scale_ch",      NVS_T_U32,   "0")
+    X(SCALE_CH,    "scale_ch",      NVS_T_U32,   "0")                                           \
+    X(MQTT_CFG,    "mqtt_cfg",      NVS_T_BLOB,  "")
 /* --------------------------------------------------------------------------
  * Auto-generate NVS_KEY_<SUFFIX> string constants from the table.
  *
@@ -74,6 +75,12 @@ esp_err_t nvs_config_set_i32    (const char *key, int32_t   value);
 
 esp_err_t nvs_config_get_float  (const char *key, float    *out_val);
 esp_err_t nvs_config_set_float  (const char *key, float     value);
+
+#define NVS_CONFIG_BLOB_MAX 1024U
+
+esp_err_t nvs_config_get_blob   (const char *key, void *buf, size_t *len);
+esp_err_t nvs_config_set_blob   (const char *key, const void *buf, size_t len);
+esp_err_t nvs_config_erase_key  (const char *key);
 
 /**
  * @brief Write factory defaults for every absent key (first-boot only).
