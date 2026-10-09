@@ -31,6 +31,9 @@ class LiveState:
             self._sender = {}  # sender_id -> {channel_id: (g, age_ms, stable, stamp)}
             self._revision = 0
             self._received = self._rejected = 0
+            self._weight_rejected = 0
+            self._last_reject = {}
+            self._boots = {}   # sender_id -> (current boot_id, previous boot_id, changed stamp)
             self._instance = uuid4().hex
 
     def reset_weight_session(self):
@@ -146,19 +149,48 @@ class LiveState:
         return True
 
     def update_sender_weight(self, sender_id, channel_id, uptime_ms, grams, age_ms,
-                             stable=False, received_at=None):
+                             stable=False, received_at=None, boot_id=None):
         """cas/{sender}/telemetry/weight (1-2 Hz observability copy, never weight/ctl).
         Kept per sender and channel, apart from the relay's slot; the ordering key is
         '<sender>/<channel>' so the two channels' uptime stamps cannot collide."""
         now = self._clock() if received_at is None else received_at
         with self._lock:
-            if not self._accept_weight_order(f"{sender_id}/{channel_id}", uptime_ms, now):
-                self._rejected += 1
+            if boot_id is not None and not self._accept_boot(sender_id, boot_id, now):
+                self._reject_weight(sender_id, "boot_id regression", now)
                 return False
+            if not self._accept_weight_order(f"{sender_id}/{channel_id}", uptime_ms, now):
+                self._reject_weight(sender_id, "uptime order", now)
+                return False
+            if boot_id is not None:
+                self._record_boot(sender_id, boot_id, now)
             self._sender.setdefault(sender_id, {})[channel_id] = (grams, age_ms, bool(stable), now)
             self._revision += 1
             self._received += 1
         return True
+
+    def _accept_boot(self, sender_id, boot_id, now):
+        cur = self._boots.get(sender_id)
+        return not (cur and boot_id != cur[0] and boot_id == cur[1] and now - cur[2] < 10)
+
+    def _record_boot(self, sender_id, boot_id, now):
+        cur = self._boots.get(sender_id)
+        if cur is None:
+            if len(self._boots) >= MAX_LIVE_DEVICES:
+                return
+            self._boots[sender_id] = (boot_id, None, now)
+        elif cur[0] != boot_id:
+            self._boots[sender_id] = (boot_id, cur[0], now)
+
+    def _reject_weight(self, device_id, reason, now):
+        self._rejected += 1
+        self._weight_rejected += 1
+        if device_id not in self._last_reject and len(self._last_reject) >= MAX_LIVE_DEVICES:
+            del self._last_reject[next(iter(self._last_reject))]
+        self._last_reject[device_id] = reason
+
+    def note_reject(self, device_id, reason):
+        with self._lock:
+            self._reject_weight(device_id, str(reason)[:120], self._clock())
 
     @staticmethod
     def _sender_view(senders, now):
@@ -183,10 +215,12 @@ class LiveState:
             live = dict(self._live.get(controller[0], ())) if controller else {}
             revision, received, rejected = self._revision, self._received, self._rejected
             instance = self._instance
+            weight_rejected, last_reject = self._weight_rejected, dict(self._last_reject)
             senders = {s: dict(c) for s, c in self._sender.items()}
         now = self._clock()
         out = {"instance": instance, "revision": revision, "weight": None, "controller": None,
-               "diagnostics": {"received": received, "rejected": rejected}}
+               "diagnostics": {"received": received, "rejected": rejected,
+                               "weight_rejected": weight_rejected, "last_reject": last_reject}}
         out["senders"] = self._sender_view(senders, now)
         if weight:
             data, stamp = weight

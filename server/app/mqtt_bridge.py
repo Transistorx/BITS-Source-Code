@@ -423,9 +423,14 @@ def _live(device_id: str, body: dict) -> None:
 
 def _weight(device_id: str, body: dict) -> None:
     from .services.live_state import live_state
-    msg = MqttWeight.model_validate(body)
+    try:
+        msg = MqttWeight.model_validate(body)
+    except ValidationError as exc:
+        err = exc.errors()[0]
+        live_state.note_reject(device_id, f"{'.'.join(str(x) for x in err['loc'])}: {err['type']}")
+        return
     live_state.update_sender_weight(device_id, msg.channel, msg.uptime_ms, msg.weight_g,
-                                    msg.age_ms, msg.stable)
+                                    msg.age_ms, msg.stable, boot_id=_valid_boot_id(body))
 
 
 def _valid_boot_id(body: dict) -> str | None:
