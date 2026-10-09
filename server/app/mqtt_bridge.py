@@ -20,6 +20,7 @@ import logging
 import os
 import queue
 import re
+import ssl
 import threading
 import time
 from datetime import timezone
@@ -841,6 +842,39 @@ def configure_client(client) -> None:
     client.reconnect_delay_set(min_delay=1, max_delay=30)  # exponential backoff
 
 
+class MqttConfigError(RuntimeError):
+    pass
+
+
+def _check_ca_file(path: str) -> None:
+    if not os.path.isfile(path):
+        raise MqttConfigError(f"MQTT_TLS_CA_FILE not found or not a file: {path}")
+    try:
+        with open(path, "rb") as fh:
+            fh.read(1)
+    except OSError as exc:
+        raise MqttConfigError(f"MQTT_TLS_CA_FILE unreadable: {path} ({type(exc).__name__})") from None
+
+
+def apply_tls(client) -> None:
+    ca_file = settings.mqtt_tls_ca_file
+    if ca_file:
+        _check_ca_file(ca_file)
+    try:
+        client.tls_set(ca_certs=ca_file or None, cert_reqs=ssl.CERT_REQUIRED,
+                       tls_version=ssl.PROTOCOL_TLS_CLIENT)
+    except (OSError, ValueError) as exc:
+        raise MqttConfigError(f"MQTT_TLS setup failed (MQTT_TLS_CA_FILE={ca_file or 'system CAs'}): "
+                              f"{type(exc).__name__}: {exc}") from None
+    ctx = getattr(client, "_ssl_context", None)
+    if not isinstance(ctx, ssl.SSLContext):
+        raise MqttConfigError("MQTT_TLS setup failed: no SSL context to enforce TLS 1.2 minimum")
+    if ctx.minimum_version != ssl.TLSVersion.TLSv1_3:
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    if ctx.verify_mode != ssl.CERT_REQUIRED or not ctx.check_hostname:
+        raise MqttConfigError("MQTT_TLS setup failed: certificate or hostname verification is off")
+
+
 def _worker_count() -> int:
     try:
         return int(os.getenv("WEB_CONCURRENCY", "1"))
@@ -861,6 +895,10 @@ def start() -> None:
         log.error("paho-mqtt not installed; MQTT bridge disabled")
         return
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=settings.mqtt_client_id)
+    if settings.mqtt_tls:
+        apply_tls(client)
+        if settings.mqtt_broker_port == 1883:
+            log.warning("MQTT_TLS on with MQTT_BROKER_PORT 1883; TLS brokers usually listen on 8883")
 
     def on_connect(c, _u, _f, reason_code, _p=None):
         handle_connect(c, reason_code)
@@ -888,7 +926,8 @@ def start() -> None:
         return
     _client = client
     set_publisher(PahoPublisher(client))
-    log.info("MQTT bridge started for %s:%s", settings.mqtt_broker_host, settings.mqtt_broker_port)
+    log.info("MQTT bridge started for %s:%s (tls=%s)", settings.mqtt_broker_host,
+             settings.mqtt_broker_port, settings.mqtt_tls)
 
 
 def stop() -> None:

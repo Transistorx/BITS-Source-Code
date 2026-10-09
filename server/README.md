@@ -35,6 +35,11 @@ do not imply two simultaneously usable physical scales.
 [the contract](../docs/telemetry/CONTRACT.md) section 7. It is gated by
 `MQTT_ENABLED` (default `false`); broker via `MQTT_BROKER_HOST` /
 `MQTT_BROKER_PORT`, optional auth via `MQTT_USERNAME` / `MQTT_PASSWORD`.
+Broker TLS is off by default; set `MQTT_TLS=true` and point `MQTT_BROKER_PORT`
+at the broker TLS listener (usually 8883). The certificate and hostname are
+always verified with TLS 1.2 minimum, against `MQTT_TLS_CA_FILE` (PEM, for a
+private CA) or the system CAs when it is empty. A set but missing or unreadable
+`MQTT_TLS_CA_FILE` stops startup with an error. The password is never logged.
 HTTP stays the fallback command/history/health transport, and WebSocket
 connects the two ESP32s. See [the integrated audit](../docs/integrated-audit/REPORT.md).
 
