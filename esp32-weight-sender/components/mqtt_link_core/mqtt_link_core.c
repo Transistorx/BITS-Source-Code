@@ -287,7 +287,12 @@ bool mqtt_link_queues_init(mqtt_link_queues_t *q, size_t rx_depth, size_t pub_de
 {
     if (q == NULL || rx_depth == 0U || pub_depth == 0U) return false;
     atomic_store(&q->open, false);
-    if (!q_quiesce(q, MQTT_LINK_QUIESCE_MS)) return false;
+    if (q->magic == MQTT_LINK_QUEUES_MAGIC) {
+        if (!q_quiesce(q, MQTT_LINK_QUIESCE_MS)) return false;
+    } else {
+        atomic_store(&q->users, 0U);
+        q->magic = MQTT_LINK_QUEUES_MAGIC;
+    }
     q->rx = NULL;
     q->pub = NULL;
     q->doorbell = NULL;

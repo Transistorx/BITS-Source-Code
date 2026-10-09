@@ -39,6 +39,7 @@ extern "C" {
 #define MQTT_LINK_WEIGHT_FUTURE_TOL_MS 100U
 #define MQTT_LINK_WEIGHT_MAX_AGE_MS 3000U
 #define MQTT_LINK_QUIESCE_MS 200U
+#define MQTT_LINK_QUEUES_MAGIC 0x51554555U
 #define MQTT_LINK_SOURCE_MAX 31U
 
 #define MQTT_LINK_BACKOFF_MIN_MS 1000U
@@ -194,6 +195,7 @@ typedef struct {
     StaticSemaphore_t doorbell_buf;
     atomic_bool open;
     atomic_uint users;
+    uint32_t magic;
     _Atomic uint32_t rx_dropped_full;
     _Atomic uint32_t pub_dropped_full;
     _Atomic uint32_t weight_overwritten;
