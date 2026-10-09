@@ -274,6 +274,7 @@ static void test_commands(void)
     test_check(submit("{\"command_id\":43,\"type\":\"ZERO\",\"channel_id\":\"CH2\",\"ttl_ms\":10000}", true, &a) ==
                    SCALE_SUBMIT_IGNORED, "cmd_retained_ignored");
     test_check(!scale_cmd_run_one(&s_cmd, 0, &a), "cmd_retained_never_queued");
+    g_now += 2000U;
     test_check(submit_cmd(43, "ZERO", OK_CH, OK_TTL, &a) == SCALE_SUBMIT_QUEUED,
                "cmd_retained_id_still_unused");
     scale_cmd_run_one(&s_cmd, 0, &a);
@@ -320,6 +321,7 @@ static void test_commands(void)
     test_check(scale_cmd_submit(&s_cmd, p, strlen(p), false, g_now - 10001U, &a) == SCALE_SUBMIT_ACK &&
                    a.result == SCALE_RESULT_TIMEOUT && !a.applied && strstr(a.reason, "expired"),
                "cmd_expired_at_receipt_rejected");
+    g_now += 2000U;
     /* Boundary: age == ttl is still valid, age == ttl+1 is expired. */
     snprintf(p, sizeof(p), "{\"command_id\":22,\"type\":\"ZERO\",\"channel_id\":\"CH2\",\"ttl_ms\":10000}");
     test_check(scale_cmd_submit(&s_cmd, p, strlen(p), false, g_now - 10000U, &a) == SCALE_SUBMIT_QUEUED,
@@ -327,6 +329,7 @@ static void test_commands(void)
     test_check(scale_cmd_run_one(&s_cmd, 0, &a) && a.command_id == 22U && a.result != SCALE_RESULT_TIMEOUT &&
                    g_encodes == 1, "cmd_age_equals_ttl_executes");
     g_encodes = 0;
+    g_now += 2000U;
     /* Execute side: accepted at age == ttl, then one tick later it is expired and must not run. */
     snprintf(p, sizeof(p), "{\"command_id\":23,\"type\":\"ZERO\",\"channel_id\":\"CH2\",\"ttl_ms\":10000}");
     test_check(scale_cmd_submit(&s_cmd, p, strlen(p), false, g_now - 10000U, &a) == SCALE_SUBMIT_QUEUED,
@@ -334,6 +337,7 @@ static void test_commands(void)
     g_now += 1U;
     test_check(scale_cmd_run_one(&s_cmd, 0, &a) && a.command_id == 23U && a.result == SCALE_RESULT_TIMEOUT &&
                    strstr(a.reason, "expired before start") && g_encodes == 0, "cmd_age_ttl_plus1_expires_at_execute");
+    g_now += 2000U;
     test_check(submit_cmd(21, "ZERO", OK_CH, ",\"ttl_ms\":1000", &a) == SCALE_SUBMIT_QUEUED, "cmd_fresh_queued");
     g_now += 1500U;
     test_check(scale_cmd_run_one(&s_cmd, 0, &a) && a.command_id == 21U && a.result == SCALE_RESULT_TIMEOUT &&
@@ -361,9 +365,11 @@ static void test_commands(void)
     fresh(enc_counting_unverified, false);
     for (unsigned i = 0; i < SCALE_CMD_QUEUE_DEPTH; i++) {
         char ok[8];
+        g_now += 2000U;
         snprintf(ok, sizeof(ok), "q%u", i);
         if (submit_cmd(100 + i, "ZERO", OK_CH, OK_TTL, &a) != SCALE_SUBMIT_QUEUED) test_check(false, ok);
     }
+    g_now += 2000U;
     test_check(rejected_with(submit_cmd(110, "ZERO", OK_CH, OK_TTL, &a), &a, "queue full"),
                "cmd_queue_saturation_rejects");
     /* Flooding rejects must not evict queued commands from the dedupe ring. */
@@ -374,6 +380,7 @@ static void test_commands(void)
     while (scale_cmd_run_one(&s_cmd, 0, &a)) ran++;
     test_check(ran == SCALE_CMD_QUEUE_DEPTH && g_encodes == (int)SCALE_CMD_QUEUE_DEPTH,
                "cmd_queue_drains_in_order_once_each");
+    g_now += 2000U;
     test_check(submit_cmd(111, "ZERO", OK_CH, OK_TTL, &a) == SCALE_SUBMIT_QUEUED, "cmd_queue_accepts_after_drain");
     scale_cmd_run_one(&s_cmd, 0, &a);
 
@@ -382,6 +389,7 @@ static void test_commands(void)
     fresh(enc_fake_ok, true);
     submit_cmd(290, "ZERO", OK_CH, OK_TTL, &a);
     scale_cmd_run_one(&s_cmd, 0, &a);
+    g_now += 2000U;
     submit_cmd(291, "TARE", OK_CH, OK_TTL, &d);
     scale_cmd_ack_t t2;
     scale_cmd_run_one(&s_cmd, 0, &t2);

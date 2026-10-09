@@ -12,7 +12,8 @@
 #define DEV  "bits-a4cf12ab34cd"
 #define BOOT "a1b2c3d4"
 
-static uint32_t m_now(void) { return 1000U; }
+static uint32_t g_env_now = 1000U;
+static uint32_t m_now(void) { return g_env_now; }
 static bool m_link(const char **name) { *name = "ONLINE"; return true; }
 static bool m_sample(uint8_t ch, uint32_t *seq, int32_t *g, bool *st)
 {
@@ -296,11 +297,12 @@ void test_mqtt_env_run(void)
     for (unsigned i = 0U; i < 2U; i++) {
         char p[200];
         scale_cmd_ack_t a;
+        g_env_now = 1000U + i * 2000U;
         snprintf(p, sizeof(p),
                  "{\"command_id\":%u,\"type\":\"%s\",\"channel_id\":\"CH2\","
                  "\"issued_at\":\"2026-10-07T08:15:30.123Z\",\"ttl_ms\":10000}",
                  900U + i, types[i]);
-        bool queued = scale_cmd_submit(&s, p, strlen(p), false, 1000U, &a) == SCALE_SUBMIT_QUEUED;
+        bool queued = scale_cmd_submit(&s, p, strlen(p), false, g_env_now, &a) == SCALE_SUBMIT_QUEUED;
         bool ran = scale_cmd_run_one(&s, 0, &a);
         char ack[MQTT_LINK_PAYLOAD_MAX];
         size_t an = scale_cmd_build_ack_json(&s, &a, ack, sizeof(ack));
