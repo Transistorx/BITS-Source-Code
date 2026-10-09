@@ -200,3 +200,37 @@ wipe_tmp:
 cleanup:
     return src;
 }
+
+bool broker_cfg_uri_is_tls(const char *uri)
+{
+    static const char prefix[] = "mqtts://";
+    if (uri == NULL) {
+        return false;
+    }
+    return strncmp(uri, prefix, sizeof(prefix) - 1U) == 0;
+}
+
+void broker_cfg_effective(broker_cfg_src_t src, const broker_cfg_rec_t *rec, const char *kc_uri,
+                          const char *kc_user, const char *kc_pass, broker_cfg_eff_t *eff)
+{
+    static const char empty[] = "";
+
+    if (eff == NULL) {
+        return;
+    }
+    eff->src = src;
+    eff->uri = (kc_uri != NULL) ? kc_uri : empty;
+    eff->user = (kc_user != NULL) ? kc_user : empty;
+    eff->pass = (kc_pass != NULL) ? kc_pass : empty;
+    if ((src == BROKER_CFG_SRC_NVS) && (rec != NULL) && (rec->magic == BROKER_CFG_MAGIC) &&
+        (rec->version == (uint16_t)BROKER_CFG_VERSION) && (rec->uri[0] != '\0') &&
+        (memchr(rec->uri, 0, sizeof(rec->uri)) != NULL) && (memchr(rec->user, 0, sizeof(rec->user)) != NULL) &&
+        (memchr(rec->pass, 0, sizeof(rec->pass)) != NULL)) {
+        eff->uri = rec->uri;
+        eff->user = rec->user;
+        eff->pass = rec->pass;
+    } else if (src == BROKER_CFG_SRC_NVS) {
+        eff->src = BROKER_CFG_SRC_FALLBACK_INVALID;
+    }
+    eff->tls = broker_cfg_uri_is_tls(eff->uri);
+}

@@ -16,6 +16,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "broker_cfg.h"
 #include "mqtt_link_core.h"
 
 #ifdef __cplusplus
@@ -51,6 +52,10 @@ const char *mqtt_link_device_id(void);
 
 /* Scale identity from NVS "scale_id" (default SCALE1), resolved in mqtt_link_start(). */
 const char *mqtt_link_scale_id(void);
+
+/* Broker config source resolved by the last mqtt_link_start(): nvs, kconfig or
+ * a fallback_* reason. Never re-read mid-session. */
+broker_cfg_src_t mqtt_link_config_source(void);
 
 /* 8 hex chars from esp_random, generated once per boot, never persisted. */
 const char *mqtt_link_boot_id(void);

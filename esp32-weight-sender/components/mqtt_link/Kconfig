@@ -24,6 +24,25 @@ menu "MQTT link (status + remote scale commands)"
         help
             Never logged.
 
+    config MQTT_LINK_TLS_BUNDLE
+        bool "Verify mqtts:// brokers with the ESP certificate bundle"
+        default y
+        depends on MBEDTLS_CERTIFICATE_BUNDLE
+        help
+            An mqtts:// URI attaches esp_crt_bundle_attach so the broker
+            certificate is verified against the built-in CA bundle. With this
+            off, or with MBEDTLS_CERTIFICATE_BUNDLE off, an mqtts:// URI is
+            refused at start (reason MQTT_CFG_INVALID); verification is never
+            skipped. A private CA needs a bundled PEM, not designed here.
+
+    config MQTT_LINK_WEIGHT_HB_MS
+        int "telemetry/weight heartbeat period (ms)"
+        default 1000
+        range 500 2000
+        help
+            A telemetry/weight heartbeat is published this often while no new
+            CAS frame arrives. Also the stale limit for a queued weight item.
+
     config MQTT_LINK_KEEPALIVE_S
         int "MQTT keepalive (seconds)"
         default 30

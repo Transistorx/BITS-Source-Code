@@ -37,9 +37,20 @@ typedef enum {
     BROKER_CFG_SRC_FALLBACK_INVALID
 } broker_cfg_src_t;
 
+typedef struct {
+    broker_cfg_src_t src;
+    const char *uri;
+    const char *user;
+    const char *pass;
+    bool tls;
+} broker_cfg_eff_t;
+
 bool broker_cfg_uri_valid(const char *uri);
+bool broker_cfg_uri_is_tls(const char *uri);
 bool broker_cfg_encode(broker_cfg_rec_t *rec, const char *uri, const char *user, const char *pass);
 broker_cfg_src_t broker_cfg_decode(const void *blob, size_t len, broker_cfg_rec_t *out);
+void broker_cfg_effective(broker_cfg_src_t src, const broker_cfg_rec_t *rec, const char *kc_uri,
+                          const char *kc_user, const char *kc_pass, broker_cfg_eff_t *eff);
 const char *broker_cfg_src_name(broker_cfg_src_t src);
 uint32_t broker_cfg_crc32(const void *data, size_t len);
 void broker_cfg_wipe(broker_cfg_rec_t *rec);

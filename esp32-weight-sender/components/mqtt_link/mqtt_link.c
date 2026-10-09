@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "broker_cfg.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
@@ -11,9 +12,13 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#if defined(CONFIG_MQTT_LINK_TLS_BUNDLE)
+#include "esp_crt_bundle.h"
+#endif
 #include "log_util.h"
 #include "mqtt_client.h"
 #include "mqtt_link_core.h"
+#include "nvs.h"
 #include "nvs_config.h"
 #include "sdkconfig.h"
 
@@ -34,6 +39,10 @@ static const char *TAG = "MQTT";
 #ifndef CONFIG_MQTT_LINK_KEEPALIVE_S
 #define CONFIG_MQTT_LINK_KEEPALIVE_S 30
 #endif
+#ifndef CONFIG_MQTT_LINK_WEIGHT_HB_MS
+#define CONFIG_MQTT_LINK_WEIGHT_HB_MS MQTT_LINK_WEIGHT_HB_PERIOD_MS
+#endif
+#define MQTT_HB_PERIOD_MS   ((uint32_t)CONFIG_MQTT_LINK_WEIGHT_HB_MS)
 
 /* Everything MQTT runs below the weight path (weight_tx 3, scale reader 4+). */
 #define MQTT_TASK_PRIO      2
@@ -69,6 +78,9 @@ static char s_scale_id[MQTT_LINK_SCALE_ID_MAX + 1U] = MQTT_LINK_SCALE_ID_DEFAULT
 static const char *s_fw = "unknown";
 static const char *s_role = "weight_sender";
 static mqtt_link_wgate_t s_wgate;      /* weight_tx task only */
+static broker_cfg_rec_t s_cfg_rec;
+static broker_cfg_eff_t s_cfg_eff;
+static broker_cfg_src_t s_cfg_src;
 /* Last esp-mqtt connect error, stored lock-free by the event callback and
  * only formatted by the pub task. */
 static atomic_int s_err_type;
@@ -112,6 +124,11 @@ void mqtt_link_get_stats(mqtt_link_stats_t *out)
 const char *mqtt_link_device_id(void)
 {
     return s_device_id;
+}
+
+broker_cfg_src_t mqtt_link_config_source(void)
+{
+    return s_cfg_src;
 }
 
 const char *mqtt_link_scale_id(void)
@@ -168,7 +185,7 @@ void mqtt_link_weight_frame(const mqtt_link_weight_t *w, uint32_t now_ms)
     f.scale_id = s_scale_id;
     w = &f;
     mqtt_link_wpub_t step = mqtt_link_wgate_step(&s_wgate, w->src_uart, w->cas_seq, now_ms,
-                                                 MQTT_LINK_WEIGHT_HB_PERIOD_MS);
+                                                 MQTT_HB_PERIOD_MS);
     if (step == MQTT_LINK_WPUB_NONE) return;
     if (step == MQTT_LINK_WPUB_FRAME &&
         weight_put(MQTT_LINK_WEIGHT_SLOT_CTL, MQTT_SUFFIX_WEIGHT_CTL, s_wgate.seq_ctl, w, false, now_ms)) {
@@ -320,7 +337,7 @@ static void mqtt_pub_task(void *arg)
     while (mqtt_link_lc_running(&s_lc)) {
         uint32_t poll_ms = (uint32_t)(esp_timer_get_time() / 1000);
         bool got = mqtt_link_queue_next(&s_queues, &item, MQTT_POLL_MS, poll_ms,
-                                        MQTT_LINK_WEIGHT_HB_PERIOD_MS);
+                                        MQTT_HB_PERIOD_MS);
 
         if (atomic_exchange(&s_evt_connected, false)) {
             attempt = 0U;
@@ -428,6 +445,42 @@ static void queues_release(void)
     }
 }
 
+static void resolve_broker_cfg(void)
+{
+    uint8_t blob[sizeof(broker_cfg_rec_t)];
+    size_t len = sizeof(blob);
+    broker_cfg_src_t src;
+    esp_err_t err = nvs_config_get_blob(NVS_KEY_MQTT_CFG, blob, &len);
+
+    broker_cfg_wipe(&s_cfg_rec);
+    if (err == ESP_OK) {
+        src = broker_cfg_decode(blob, len, &s_cfg_rec);
+    } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+        src = BROKER_CFG_SRC_FALLBACK_ABSENT;
+    } else if (err == ESP_ERR_NVS_INVALID_LENGTH) {
+        src = BROKER_CFG_SRC_FALLBACK_VERSION;
+    } else {
+        ESP_LOGW(TAG, "mqtt_cfg read failed: %s", esp_err_to_name(err));
+        src = BROKER_CFG_SRC_FALLBACK_INVALID;
+    }
+    memset(blob, 0, sizeof(blob));
+    broker_cfg_effective(src, &s_cfg_rec, CONFIG_MQTT_LINK_BROKER_URI, CONFIG_MQTT_LINK_USERNAME,
+                         CONFIG_MQTT_LINK_PASSWORD, &s_cfg_eff);
+    s_cfg_src = s_cfg_eff.src;
+    if (s_cfg_src != BROKER_CFG_SRC_NVS) {
+        broker_cfg_wipe(&s_cfg_rec);
+    }
+}
+
+static bool tls_bundle_available(void)
+{
+#if defined(CONFIG_MQTT_LINK_TLS_BUNDLE)
+    return true;
+#else
+    return false;
+#endif
+}
+
 static void shutdown_handler(void)
 {
     (void)mqtt_link_stop();
@@ -446,9 +499,19 @@ esp_err_t mqtt_link_start(void)
         ESP_LOGI(TAG, "deferred teardown completed");
     }
     if (mqtt_link_lc_state(&s_lc) != MQTT_LC_IDLE) return ESP_ERR_INVALID_STATE;
-    if (CONFIG_MQTT_LINK_BROKER_URI[0] == '\0') {
-        ESP_LOGW(TAG, "MQTT disabled: no broker URI configured");
+    resolve_broker_cfg();
+    if (s_cfg_eff.uri[0] == '\0') {
+        ESP_LOGW(TAG, "MQTT OFF reason=MQTT_CFG_EMPTY source=%s", broker_cfg_src_name(s_cfg_src));
         return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (s_cfg_eff.tls && !tls_bundle_available()) {
+        ESP_LOGE(TAG, "MQTT OFF reason=MQTT_CFG_INVALID source=%s mqtts without a trust anchor",
+                 broker_cfg_src_name(s_cfg_src));
+        broker_cfg_wipe(&s_cfg_rec);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (s_cfg_src != BROKER_CFG_SRC_NVS && s_cfg_src != BROKER_CFG_SRC_KCONFIG) {
+        ESP_LOGW(TAG, "mqtt_cfg unusable, using Kconfig: reason=%s", broker_cfg_src_name(s_cfg_src));
     }
 
     s_device_id[0] = '\0';
@@ -462,6 +525,7 @@ esp_err_t mqtt_link_start(void)
                          MQTT_SUFFIX_COMMANDS) ||
         !mqtt_link_presence_plan(&s_presence, s_device_id)) {
         ESP_LOGE(TAG, "device id is not usable in MQTT topics");
+        broker_cfg_wipe(&s_cfg_rec);
         return ESP_ERR_INVALID_STATE;
     }
     /* scale_id from NVS; absent or invalid falls back to the default, never a bad id. */
@@ -478,10 +542,13 @@ esp_err_t mqtt_link_start(void)
                                       s_role, s_scale_id)) {
         ESP_LOGW(TAG, "birth envelope not built; plain birth used");
     }
-    if (!mqtt_link_queues_init(&s_queues, MQTT_LINK_RX_DEPTH, MQTT_LINK_PUB_DEPTH)) return ESP_ERR_NO_MEM;
+    if (!mqtt_link_queues_init(&s_queues, MQTT_LINK_RX_DEPTH, MQTT_LINK_PUB_DEPTH)) {
+        broker_cfg_wipe(&s_cfg_rec);
+        return ESP_ERR_NO_MEM;
+    }
 
     esp_mqtt_client_config_t cfg = {
-        .broker.address.uri = CONFIG_MQTT_LINK_BROKER_URI,
+        .broker.address.uri = s_cfg_eff.uri,
         .credentials.client_id = s_device_id,
         .session.keepalive = CONFIG_MQTT_LINK_KEEPALIVE_S,
         .session.last_will = {
@@ -500,18 +567,29 @@ esp_err_t mqtt_link_start(void)
         .buffer.out_size = 1024,
         .outbox.limit = MQTT_OUTBOX_LIMIT,
     };
-    if (CONFIG_MQTT_LINK_USERNAME[0] != '\0') {
-        cfg.credentials.username = CONFIG_MQTT_LINK_USERNAME;
-        cfg.credentials.authentication.password = CONFIG_MQTT_LINK_PASSWORD;
+    bool auth = s_cfg_eff.user[0] != '\0';
+    if (auth) {
+        cfg.credentials.username = s_cfg_eff.user;
+        cfg.credentials.authentication.password = s_cfg_eff.pass;
     }
+#if defined(CONFIG_MQTT_LINK_TLS_BUNDLE)
+    if (s_cfg_eff.tls) {
+        cfg.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+#endif
 
     atomic_store(&s_connected, false);
     atomic_store(&s_evt_connected, false);
     atomic_store(&s_evt_disconnected, false);
     mqtt_link_handoff_init(&s_pub_handoff);
 
+    char shown[96];
+    mqtt_link_uri_redact(shown, sizeof(shown), s_cfg_eff.uri);
     s_client = esp_mqtt_client_init(&cfg);
+    broker_cfg_wipe(&s_cfg_rec);
+    memset(&cfg, 0, sizeof(cfg));
     if (s_client == NULL) {
+        ESP_LOGE(TAG, "MQTT OFF reason=MQTT_INIT_FAIL source=%s", broker_cfg_src_name(s_cfg_src));
         queues_release();
         return ESP_FAIL;
     }
@@ -539,9 +617,8 @@ esp_err_t mqtt_link_start(void)
         s_shutdown_hooked = (esp_register_shutdown_handler(shutdown_handler) == ESP_OK);
     }
 
-    char shown[96];
-    mqtt_link_uri_redact(shown, sizeof(shown), CONFIG_MQTT_LINK_BROKER_URI);
-    ESP_LOGI(TAG, "STARTED broker=%s device=%s keepalive=%ds", shown, s_device_id,
+    ESP_LOGI(TAG, "STARTED broker=%s source=%s tls=%u auth=%u device=%s keepalive=%ds", shown,
+             broker_cfg_src_name(s_cfg_src), (unsigned)s_cfg_eff.tls, (unsigned)auth, s_device_id,
              CONFIG_MQTT_LINK_KEEPALIVE_S);
     return ESP_OK;
 }

@@ -262,11 +262,107 @@ static void test_nvs_blob_api(void)
     broker_cfg_wipe(&out);
 }
 
+#define KC_URI "mqtt://kc.lan:1883"
+#define KC_USER "kc_user"
+#define KC_PASS "kc_pass"
+#define NVS_URI "mqtts://nvs.lan:8883"
+#define NVS_USER "dev_nvs"
+#define NVS_PASS "pw_nvs_secret"
+
+static bool eff_is_kconfig(const broker_cfg_eff_t *e)
+{
+    return (e->uri != NULL) && (e->user != NULL) && (e->pass != NULL) && (strcmp(e->uri, KC_URI) == 0) &&
+           (strcmp(e->user, KC_USER) == 0) && (strcmp(e->pass, KC_PASS) == 0) && !e->tls;
+}
+
+static bool eff_leaks_nvs(const broker_cfg_eff_t *e)
+{
+    return (e->pass != NULL) && (strcmp(e->pass, NVS_PASS) == 0);
+}
+
+static void resolve(const void *blob, size_t len, broker_cfg_rec_t *rec, broker_cfg_eff_t *eff)
+{
+    broker_cfg_src_t src = broker_cfg_decode(blob, len, rec);
+    broker_cfg_effective(src, rec, KC_URI, KC_USER, KC_PASS, eff);
+}
+
+static void test_resolution_table(void)
+{
+    broker_cfg_rec_t good;
+    broker_cfg_rec_t bad;
+    broker_cfg_rec_t rec;
+    broker_cfg_eff_t eff;
+
+    test_check(broker_cfg_encode(&good, NVS_URI, NVS_USER, NVS_PASS), "REQ-WMQ-21_table_record_encodes");
+
+    resolve(NULL, 0U, &rec, &eff);
+    test_check(eff.src == BROKER_CFG_SRC_FALLBACK_ABSENT && eff_is_kconfig(&eff) && !eff_leaks_nvs(&eff),
+               "REQ-WMQ-21_no_record_resolves_kconfig");
+
+    resolve(&good, sizeof(good), &rec, &eff);
+    test_check(eff.src == BROKER_CFG_SRC_NVS && strcmp(eff.uri, NVS_URI) == 0 && strcmp(eff.user, NVS_USER) == 0 &&
+                   strcmp(eff.pass, NVS_PASS) == 0 && eff.uri == rec.uri,
+               "REQ-WMQ-21_valid_record_resolves_nvs");
+    test_check(eff.tls, "REQ-WMQ-22_mqtts_record_sets_tls_flag");
+
+    bad = good;
+    bad.pass[0] ^= 0x01;
+    resolve(&bad, sizeof(bad), &rec, &eff);
+    test_check(eff.src == BROKER_CFG_SRC_FALLBACK_CRC && eff_is_kconfig(&eff) && !eff_leaks_nvs(&eff) &&
+                   all_zero(&rec, sizeof(rec)),
+               "REQ-WMQ-23_corrupt_record_resolves_kconfig");
+
+    bad = good;
+    bad.version = (uint16_t)(BROKER_CFG_VERSION + 1U);
+    bad.crc32 = broker_cfg_crc32(&bad, offsetof(broker_cfg_rec_t, crc32));
+    resolve(&bad, sizeof(bad), &rec, &eff);
+    test_check(eff.src == BROKER_CFG_SRC_FALLBACK_VERSION && eff_is_kconfig(&eff) && !eff_leaks_nvs(&eff),
+               "REQ-WMQ-23_version_mismatch_resolves_kconfig");
+
+    resolve(&good, sizeof(good) - 1U, &rec, &eff);
+    test_check(eff.src == BROKER_CFG_SRC_FALLBACK_VERSION && eff_is_kconfig(&eff) && !eff_leaks_nvs(&eff),
+               "REQ-WMQ-23_short_record_resolves_kconfig");
+
+    bad = good;
+    memset(bad.uri, 'a', sizeof(bad.uri));
+    bad.crc32 = broker_cfg_crc32(&bad, offsetof(broker_cfg_rec_t, crc32));
+    resolve(&bad, sizeof(bad), &rec, &eff);
+    test_check(eff.src == BROKER_CFG_SRC_FALLBACK_INVALID && eff_is_kconfig(&eff) && !eff_leaks_nvs(&eff),
+               "REQ-WMQ-22_unterminated_uri_resolves_kconfig");
+
+    test_check(broker_cfg_encode(&bad, "", NVS_USER, NVS_PASS), "REQ-WMQ-21_empty_uri_record_encodes");
+    resolve(&bad, sizeof(bad), &rec, &eff);
+    test_check(eff.src == BROKER_CFG_SRC_KCONFIG && eff_is_kconfig(&eff) && !eff_leaks_nvs(&eff),
+               "REQ-WMQ-21_empty_uri_record_resolves_kconfig");
+
+    broker_cfg_wipe(&rec);
+    broker_cfg_effective(BROKER_CFG_SRC_NVS, &rec, KC_URI, KC_USER, KC_PASS, &eff);
+    test_check(eff.src == BROKER_CFG_SRC_FALLBACK_INVALID && eff_is_kconfig(&eff),
+               "REQ-WMQ-24_nvs_source_with_wiped_record_falls_back");
+
+    broker_cfg_effective(BROKER_CFG_SRC_FALLBACK_ABSENT, NULL, NULL, NULL, NULL, &eff);
+    test_check(eff.uri != NULL && eff.user != NULL && eff.pass != NULL && eff.uri[0] == '\0' && !eff.tls,
+               "REQ-WMQ-24_null_kconfig_resolves_empty_not_null");
+
+    broker_cfg_effective(BROKER_CFG_SRC_FALLBACK_ABSENT, NULL, "mqtts://kc.lan:8883", "", "", &eff);
+    test_check(eff.tls && strcmp(eff.uri, "mqtts://kc.lan:8883") == 0, "REQ-WMQ-22_mqtts_kconfig_sets_tls_flag");
+
+    test_check(broker_cfg_uri_is_tls("mqtts://h") && !broker_cfg_uri_is_tls("mqtt://h") &&
+                   !broker_cfg_uri_is_tls("MQTTS://h") && !broker_cfg_uri_is_tls("mqtts:/h") &&
+                   !broker_cfg_uri_is_tls(NULL) && !broker_cfg_uri_is_tls(""),
+               "REQ-WMQ-22_tls_scheme_detection");
+
+    broker_cfg_wipe(&good);
+    broker_cfg_wipe(&bad);
+    broker_cfg_wipe(&rec);
+}
+
 void test_broker_cfg_run(void)
 {
     test_crc_and_layout();
     test_power_loss();
     test_fields();
     test_uri_table();
+    test_resolution_table();
     test_nvs_blob_api();
 }
