@@ -27,6 +27,7 @@
 #include "test_mqtt_cmd.h"
 #include "test_mqtt_stop.h"
 #include "test_mqtt_env.h"
+#include "test_mqtt_stats.h"
 #include "test_transport_golden.h"
 #include "test_weight_mqtt_fix.h"
 #include "weight_source.h"
@@ -442,6 +443,7 @@ void app_main(void)
      * See docs/superpowers/baseline/rs232-golden/GOLDEN_BASELINE.md. These
      * pin parser output, the framing layer and the transport event contract
      * so a transport refactor cannot silently change behaviour. */
+    test_mqtt_stats_run();
     test_transport_golden_run();
 
     /* ---- Board pin map (RS-485 / UART / strap-pad contract) ----

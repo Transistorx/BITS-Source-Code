@@ -46,16 +46,6 @@ bool mqtt_link_publish(const char *topic_suffix, const char *json, int qos, bool
 
 bool mqtt_link_connected(void);
 
-/* Lock-free snapshot for the health line. Counters only; never blocks. */
-typedef struct {
-    bool connected;
-    uint32_t published;       /* publishes handed to esp-mqtt */
-    uint32_t publish_failed;  /* esp-mqtt refused the publish */
-    uint32_t queue_depth;     /* items waiting for the pub task */
-    uint32_t dropped_full;    /* enqueue refused: queue full */
-    uint32_t dropped_other;   /* oversize / fragment / retained */
-    uint32_t dropped_offline; /* QoS 0 refused while disconnected */
-} mqtt_link_stats_t;
 void mqtt_link_get_stats(mqtt_link_stats_t *out);
 const char *mqtt_link_device_id(void);
 

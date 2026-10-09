@@ -6,7 +6,7 @@ foreach(wmq_comp broker_cfg task_hb)
 endforeach()
 
 idf_component_register(
-    SRCS "test_main.c" "test_transport_golden.c" "test_board_pinmap.c" "mock_transport.c" "test_responsiveness.c" "test_mqtt_cmd.c" "test_mqtt_stop.c" "test_mqtt_env.c" "test_log_util.c" "test_diag_channels.c" "test_reader_safety.c" "test_weight_mqtt.c" "test_weight_mqtt_fix.c"
+    SRCS "test_main.c" "test_transport_golden.c" "test_board_pinmap.c" "mock_transport.c" "test_responsiveness.c" "test_mqtt_cmd.c" "test_mqtt_stop.c" "test_mqtt_env.c" "test_log_util.c" "test_diag_channels.c" "test_reader_safety.c" "test_weight_mqtt.c" "test_weight_mqtt_fix.c" "test_mqtt_stats.c"
     INCLUDE_DIRS
         "."
         # Frozen RS232 golden vectors, captured before the transport

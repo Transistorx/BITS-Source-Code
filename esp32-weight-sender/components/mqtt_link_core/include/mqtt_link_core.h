@@ -170,6 +170,7 @@ typedef struct {
     uint8_t  kind;
     uint8_t  qos;
     bool     retain;
+    bool     from_weight;
     uint16_t len;
     uint32_t recv_ms;
     char     topic[MQTT_LINK_TOPIC_MAX];
@@ -226,6 +227,46 @@ bool mqtt_link_queue_next(mqtt_link_queues_t *q, mqtt_item_t *out, uint32_t time
                           uint32_t now_ms, uint32_t stale_ms);
 
 size_t mqtt_link_queue_pending(mqtt_link_queues_t *q);
+
+typedef struct {
+    bool connected;
+    uint32_t published;
+    uint32_t publish_failed;
+    uint32_t queue_depth;
+    uint32_t dropped_full;
+    uint32_t dropped_other;
+    uint32_t dropped_offline;
+    uint32_t rx_dropped_full;
+    uint32_t pub_dropped_full;
+    uint32_t weight_published;
+    uint32_t weight_overwritten;
+    uint32_t weight_dropped_stale;
+    uint32_t weight_dropped_future;
+    uint16_t heap_min_kb;
+    uint8_t link_state;
+    bool pub_stuck;
+    bool teardown_pending;
+    uint16_t stop_pub_stuck;
+    uint16_t stop_deferred;
+} mqtt_link_stats_t;
+
+void mqtt_link_queue_stats(mqtt_link_queues_t *q, mqtt_link_stats_t *out);
+
+uint16_t mqtt_link_sat16(uint32_t v);
+
+typedef struct {
+    const char *role;
+    const char *boot_id;
+    const char *firmware;
+    const char *cas_link;
+    uint32_t cas_seq;
+    uint32_t cas_age_ms;
+    bool ws_client;
+    uint32_t uptime_ms;
+} mqtt_link_status_t;
+
+size_t mqtt_link_status_json(char *out, size_t cap, const mqtt_link_status_t *st,
+                             const mqtt_link_stats_t *m);
 
 typedef void (*mqtt_link_flush_cb)(const mqtt_item_t *item, void *ctx);
 size_t mqtt_link_queue_flush(mqtt_link_queues_t *q, mqtt_item_t *scratch, size_t max_items,

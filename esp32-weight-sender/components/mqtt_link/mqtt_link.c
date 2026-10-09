@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_system.h"
@@ -59,6 +60,10 @@ static atomic_int s_published_id;
 static atomic_uint s_published_count;  /* publishes handed to esp-mqtt, for the health line */
 static atomic_uint s_publish_failed;
 static atomic_uint s_dropped_offline;  /* QoS 0 refused while the broker is down */
+static atomic_uint s_weight_published;
+static atomic_uint s_stop_pub_stuck;
+static atomic_uint s_stop_deferred;
+static atomic_bool s_pub_stuck;
 static char s_boot_id[MQTT_LINK_BOOT_ID_LEN + 1U];
 static char s_scale_id[MQTT_LINK_SCALE_ID_MAX + 1U] = MQTT_LINK_SCALE_ID_DEFAULT;
 static const char *s_fw = "unknown";
@@ -89,13 +94,19 @@ bool mqtt_link_connected(void)
 void mqtt_link_get_stats(mqtt_link_stats_t *out)
 {
     if (out == NULL) return;
+    memset(out, 0, sizeof(*out));
+    mqtt_link_queue_stats(&s_queues, out);
     out->connected = atomic_load(&s_connected);
     out->published = atomic_load(&s_published_count);
     out->publish_failed = atomic_load(&s_publish_failed);
-    out->queue_depth = (uint32_t)mqtt_link_queue_pending(&s_queues);
-    out->dropped_full = atomic_load(&s_queues.rx_dropped_full) + atomic_load(&s_queues.pub_dropped_full);
-    out->dropped_other = atomic_load(&s_queues.dropped_other);
     out->dropped_offline = atomic_load(&s_dropped_offline);
+    out->weight_published = atomic_load(&s_weight_published);
+    out->heap_min_kb = mqtt_link_sat16((uint32_t)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024U));
+    out->link_state = s_lc_ready ? (uint8_t)mqtt_link_lc_state(&s_lc) : (uint8_t)MQTT_LC_IDLE;
+    out->pub_stuck = atomic_load(&s_pub_stuck);
+    out->teardown_pending = atomic_load(&s_teardown_pending);
+    out->stop_pub_stuck = mqtt_link_sat16(atomic_load(&s_stop_pub_stuck));
+    out->stop_deferred = mqtt_link_sat16(atomic_load(&s_stop_deferred));
 }
 
 const char *mqtt_link_device_id(void)
@@ -225,14 +236,19 @@ static void publish_item(const mqtt_item_t *item)
         if (esp_mqtt_client_publish(s_client, item->topic, item->data, item->len,
                                     item->qos, item->retain) >= 0) {
             atomic_fetch_add(&s_published_count, 1U);
+            if (item->from_weight) atomic_fetch_add(&s_weight_published, 1U);
         } else {
             atomic_fetch_add(&s_publish_failed, 1U);
         }
     } else if (item->qos > 0) {
         /* Command ACKs wait in the (size-limited) outbox for the next connect. */
-        (void)esp_mqtt_client_enqueue(s_client, item->topic, item->data, item->len,
-                                      item->qos, item->retain, true);
-    } /* QoS 0 telemetry while disconnected is dropped on purpose. */
+        if (esp_mqtt_client_enqueue(s_client, item->topic, item->data, item->len,
+                                    item->qos, item->retain, true) < 0) {
+            atomic_fetch_add(&s_publish_failed, 1U);
+        }
+    } else {
+        atomic_fetch_add(&s_dropped_offline, 1U);
+    }
 }
 
 static void on_connected(void)
@@ -279,6 +295,7 @@ static bool link_teardown(void)
     atomic_store(&s_connected, false);
     if (!mqtt_link_queues_deinit(&s_queues)) {
         atomic_store(&s_teardown_pending, true);
+        atomic_fetch_add(&s_stop_deferred, 1U);
         ESP_LOGE(TAG, "queues still in use after %ums; kept allocated, link held stopped reason=MQTT_STOP_QUEUES_BUSY",
                  (unsigned)MQTT_LINK_QUIESCE_MS);
         return false;
@@ -349,6 +366,7 @@ static void mqtt_pub_task(void *arg)
         }
     }
     if (!mqtt_link_handoff_task_exit(&s_pub_handoff)) {
+        atomic_store(&s_pub_stuck, false);
         ESP_LOGW(TAG, "pub task exited after stop gave up; finishing teardown reason=MQTT_STOP_LATE_EXIT");
         (void)link_teardown();
     }
@@ -374,6 +392,8 @@ esp_err_t mqtt_link_stop(void)
 
     /* Pub task sees STOPPING and exits; it is the only other publisher. */
     if (!mqtt_link_handoff_wait(&s_pub_handoff, MQTT_STOP_TASK_WAIT_MS)) {
+        atomic_store(&s_pub_stuck, true);
+        atomic_fetch_add(&s_stop_pub_stuck, 1U);
         ESP_LOGE(TAG, "pub task did not exit in %ums; teardown deferred to it reason=MQTT_STOP_PUB_STUCK",
                  (unsigned)MQTT_STOP_TASK_WAIT_MS);
         return ESP_ERR_TIMEOUT;

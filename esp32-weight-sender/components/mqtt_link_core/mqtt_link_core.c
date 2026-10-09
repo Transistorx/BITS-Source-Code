@@ -355,6 +355,7 @@ static mqtt_enq_result_t push_rx_open(mqtt_link_queues_t *q, const char *topic, 
     item.kind = MQTT_ITEM_RX;
     item.qos = 0U;
     item.retain = false;
+    item.from_weight = false;
     item.len = (uint16_t)data_len;
     item.recv_ms = now_ms;
     memcpy(item.topic, topic, topic_len);
@@ -388,6 +389,7 @@ static mqtt_enq_result_t build_pub(mqtt_link_queues_t *q, mqtt_item_t *item, con
     item->kind = MQTT_ITEM_PUB;
     item->qos = (uint8_t)qos;
     item->retain = retain;
+    item->from_weight = false;
     item->len = (uint16_t)dl;
     item->recv_ms = stamp_ms;
     memcpy(item->topic, topic, tl + 1U);
@@ -463,6 +465,7 @@ static mqtt_enq_result_t build_weight_rec(mqtt_link_queues_t *q, mqtt_item_t *it
     item->kind = MQTT_ITEM_WEIGHT;
     item->qos = 0U;
     item->retain = false;
+    item->from_weight = true;
     item->len = (uint16_t)sizeof(rec);
     item->recv_ms = now_ms;
     memcpy(item->topic, topic, tl + 1U);
@@ -535,10 +538,13 @@ static bool render_weight(mqtt_link_queues_t *q, mqtt_item_t *out, uint32_t now_
 
 static bool take_ready(mqtt_link_queues_t *q, mqtt_item_t *out, uint32_t now_ms, uint32_t stale_ms)
 {
-    if (xQueueReceive(q->rx, out, 0) == pdTRUE) return true;
-    if (xQueueReceive(q->pub, out, 0) == pdTRUE) return true;
+    if (xQueueReceive(q->rx, out, 0) == pdTRUE || xQueueReceive(q->pub, out, 0) == pdTRUE) {
+        out->from_weight = false;
+        return true;
+    }
     for (unsigned i = 0U; i < MQTT_LINK_WEIGHT_SLOTS; i++) {
         if (xQueueReceive(q->weight[i], out, 0) != pdTRUE) continue;
+        out->from_weight = true;
         wage_t a = weight_age(out->recv_ms, now_ms, stale_ms);
         if (a != WAGE_FRESH) {
             count_age_drop(q, a);
@@ -582,12 +588,63 @@ size_t mqtt_link_queue_pending(mqtt_link_queues_t *q)
     return n;
 }
 
+uint16_t mqtt_link_sat16(uint32_t v)
+{
+    return v > UINT16_MAX ? (uint16_t)UINT16_MAX : (uint16_t)v;
+}
+
+void mqtt_link_queue_stats(mqtt_link_queues_t *q, mqtt_link_stats_t *out)
+{
+    if (q == NULL || out == NULL) return;
+    out->queue_depth = (uint32_t)mqtt_link_queue_pending(q);
+    out->rx_dropped_full = atomic_load(&q->rx_dropped_full);
+    out->pub_dropped_full = atomic_load(&q->pub_dropped_full);
+    out->dropped_full = out->rx_dropped_full + out->pub_dropped_full;
+    out->dropped_other = atomic_load(&q->dropped_other);
+    out->weight_overwritten = atomic_load(&q->weight_overwritten);
+    out->weight_dropped_stale = atomic_load(&q->weight_dropped_stale);
+    out->weight_dropped_future = atomic_load(&q->weight_dropped_future);
+}
+
+size_t mqtt_link_status_json(char *out, size_t cap, const mqtt_link_status_t *st,
+                             const mqtt_link_stats_t *m)
+{
+    if (out == NULL || cap == 0U || st == NULL || m == NULL || !json_plain(st->role) ||
+        !json_plain(st->boot_id) || !json_plain(st->firmware) || !json_plain(st->cas_link)) {
+        return 0U;
+    }
+    int n = snprintf(out, cap,
+                     "{\"role\":\"%s\",\"boot_id\":\"%s\",\"firmware\":\"%s\",\"cas_link\":\"%s\","
+                     "\"cas_seq\":%lu,\"cas_age_ms\":%lu,\"ws_clients\":%d,\"uptime_ms\":%lu,"
+                     "\"mqtt\":{\"pub\":%lu,\"pub_fail\":%lu,\"qdepth\":%lu,\"rx_full\":%lu,"
+                     "\"pub_full\":%lu,\"w_pub\":%lu,\"w_over\":%lu,\"w_stale\":%lu,\"w_future\":%lu,"
+                     "\"other\":%lu,\"offline\":%lu,\"heap_min_kb\":%u,\"pub_stuck\":%u,"
+                     "\"deferred\":%u}}",
+                     st->role, st->boot_id, st->firmware, st->cas_link, (unsigned long)st->cas_seq,
+                     (unsigned long)st->cas_age_ms, st->ws_client ? 1 : 0,
+                     (unsigned long)st->uptime_ms, (unsigned long)m->published,
+                     (unsigned long)m->publish_failed, (unsigned long)m->queue_depth,
+                     (unsigned long)m->rx_dropped_full, (unsigned long)m->pub_dropped_full,
+                     (unsigned long)m->weight_published, (unsigned long)m->weight_overwritten,
+                     (unsigned long)m->weight_dropped_stale, (unsigned long)m->weight_dropped_future,
+                     (unsigned long)m->dropped_other, (unsigned long)m->dropped_offline,
+                     (unsigned)m->heap_min_kb, (unsigned)m->stop_pub_stuck,
+                     (unsigned)m->stop_deferred);
+    if (n <= 0 || (size_t)n >= cap || (size_t)n > MQTT_LINK_PAYLOAD_MAX) return 0U;
+    return (size_t)n;
+}
+
 static bool take_any(mqtt_link_queues_t *q, mqtt_item_t *out)
 {
-    if (xQueueReceive(q->rx, out, 0) == pdTRUE) return true;
-    if (xQueueReceive(q->pub, out, 0) == pdTRUE) return true;
+    if (xQueueReceive(q->rx, out, 0) == pdTRUE || xQueueReceive(q->pub, out, 0) == pdTRUE) {
+        out->from_weight = false;
+        return true;
+    }
     for (unsigned i = 0U; i < MQTT_LINK_WEIGHT_SLOTS; i++) {
-        if (xQueueReceive(q->weight[i], out, 0) == pdTRUE) return true;
+        if (xQueueReceive(q->weight[i], out, 0) == pdTRUE) {
+            out->from_weight = true;
+            return true;
+        }
     }
     return false;
 }

@@ -74,7 +74,7 @@ static const char *TAG_QUEUE = "QUEUE";
 static void server_health_task(void *arg)
 {
     (void)arg;
-    char body[400];
+    static char body[MQTT_LINK_PAYLOAD_MAX + 1U];
 
     for (;;) {
         uint32_t now_ms = weight_source_now_ms();
@@ -82,25 +82,20 @@ static void server_health_task(void *arg)
         uint32_t cas_age = weight_source_have_valid_cas()
                                ? (now_ms - weight_source_last_valid_cas_ms())
                                : UINT32_MAX;
-
-        int n = snprintf(body, sizeof(body),
-                         "{\"role\":\"weight_sender\","
-                         "\"boot_id\":\"%s\","
-                         "\"firmware\":\"%s\","
-                         "\"cas_link\":\"%s\","
-                         "\"cas_seq\":%lu,"
-                         "\"cas_age_ms\":%lu,"
-                         "\"ws_clients\":%d,"
-                         "\"uptime_ms\":%lu}",
-                         mqtt_link_boot_id(),
-                         FIRMWARE_VERSION,
-                         cas_link_state_name(cas),
-                         (unsigned long)weight_source_cas_sequence(),
-                         (unsigned long)cas_age,
-                         websocket_server_has_client() ? 1 : 0,
-                         (unsigned long)now_ms);
-        if (n <= 0 || (size_t)n >= sizeof(body)) {
-            ESP_LOGE(TAG, "status body overflow");
+        mqtt_link_stats_t m;
+        mqtt_link_get_stats(&m);
+        mqtt_link_status_t st = {
+            .role = "weight_sender",
+            .boot_id = mqtt_link_boot_id(),
+            .firmware = FIRMWARE_VERSION,
+            .cas_link = cas_link_state_name(cas),
+            .cas_seq = weight_source_cas_sequence(),
+            .cas_age_ms = cas_age,
+            .ws_client = websocket_server_has_client(),
+            .uptime_ms = now_ms,
+        };
+        if (mqtt_link_status_json(body, sizeof(body), &st, &m) == 0U) {
+            ESP_LOGE(TAG, "status body overflow reason=MQTT_STATUS_TOO_BIG");
         } else {
             (void)mqtt_link_publish(MQTT_SUFFIX_STATUS, body, 0, false);
         }
