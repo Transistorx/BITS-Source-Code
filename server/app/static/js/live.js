@@ -1,5 +1,5 @@
 /* ============================================================
-   Live monitor (/live) — sender weights and ZERO/TARE over the live WebSocket (live_ws.js);
+   Live monitor (/live) - sender weights and ZERO/TARE over the live WebSocket (live_ws.js);
    controller panel from the live SSE stream with a poll fallback; DB poll for run samples.
    Requires: common.js (window.Telemetry), live_ws.js, Chart.js.
    ============================================================ */
@@ -34,6 +34,7 @@
   var rowsHost = null;
   var wsFailures = 0;
   var wsNote = '';
+  var authPrompted = false;
 
   var LAYOUT =
     '<div class="live-grid">' +
@@ -400,6 +401,23 @@
       onAuth: function () {
         wsNote = 'authenticated for commands';
         scheduleWs();
+      },
+      onAuthRequired: function (reason) {
+        if (authPrompted) {
+          wsNote = 'API key required (' + reason + '); reload the page to enter it';
+          if (wsClient) { wsClient.close(); }
+          scheduleWs();
+          return;
+        }
+        authPrompted = true;
+        wsNote = 'API key required to view live data';
+        scheduleWs();
+        promptKey();
+        if (wsClient && !wsClient.hasKey()) {
+          wsNote = 'API key required; reload the page to enter it';
+          wsClient.close();
+          scheduleWs();
+        }
       },
       onError: function (m) {
         wsNote = 'server error ' + m.code + ': ' + m.message;

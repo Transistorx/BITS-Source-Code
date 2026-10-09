@@ -146,6 +146,20 @@ class Settings:
         except ValueError:
             return 2000
 
+    @property
+    def live_ws_auth_timeout_ms(self) -> int:
+        try:
+            return min(30000, max(200, int(os.getenv("LIVE_WS_AUTH_TIMEOUT_MS", "3000"))))
+        except ValueError:
+            return 3000
+
+    @property
+    def max_ws_clients(self) -> int:
+        try:
+            return min(256, max(1, int(os.getenv("MAX_WS_CLIENTS", "16"))))
+        except ValueError:
+            return 16
+
     # Optional broker auth. Empty username = anonymous. Never log the password.
     @property
     def mqtt_username(self) -> str:

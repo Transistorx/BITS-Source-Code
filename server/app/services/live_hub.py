@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import logging
 import time
 from collections import deque
@@ -85,11 +86,16 @@ class RateWindow:
         return len(self._hits)
 
 
+class HubFull(RuntimeError):
+    pass
+
+
 class ClientSlot:
-    def __init__(self, slot_id: int, ws, authed: bool):
+    def __init__(self, slot_id: int, ws, authed: bool, loopback: bool = False):
         self.id = slot_id
         self.ws = ws
         self.authed = authed
+        self.loopback = loopback
         self.dirty: dict[str, None] = {}
         self.acks: deque = deque(maxlen=ACK_SLOTS)
         self.wake = asyncio.Event()
@@ -134,6 +140,8 @@ class LiveHub:
         self._acks_dropped = 0
         self._sends_timed_out = 0
         self._sends_failed = 0
+        self._pending_auth = 0
+        self._refused_full = 0
 
     def bind_loop(self, loop) -> None:
         self._loop = loop
@@ -152,7 +160,9 @@ class LiveHub:
                 "ack_unknown": self._ack_unknown, "ack_unrouted": self._ack_unrouted,
                 "acks_dropped": self._acks_dropped,
                 "sends_timed_out": self._sends_timed_out,
-                "sends_failed": self._sends_failed}
+                "sends_failed": self._sends_failed,
+                "pending_auth": self._pending_auth,
+                "refused_full": self._refused_full}
 
     def _handoff(self, fn, *args) -> bool:
         loop = self._loop
@@ -181,6 +191,10 @@ class LiveHub:
 
     def on_link_up_threadsafe(self) -> None:
         self._handoff(self._broadcast, self._broker_frame("CONNECTED"))
+
+    def bind_id_threadsafe(self, inf: "InFlight", command_id: int) -> None:
+        if not self._handoff(self._bind_id, inf, command_id):
+            log.warning("live ws command %d id handoff dropped: loop gone", command_id)
 
     @staticmethod
     def now() -> float:
@@ -279,11 +293,27 @@ class LiveHub:
             inf.command_id = command_id
             self._by_id[command_id] = inf
 
-    def register(self, ws, authed: bool = False) -> ClientSlot:
+    def full(self) -> bool:
+        return len(self._slots) + self._pending_auth >= settings.max_ws_clients
+
+    def pending_begin(self) -> bool:
+        if self.full():
+            self._refused_full += 1
+            return False
+        self._pending_auth += 1
+        return True
+
+    def pending_end(self) -> None:
+        self._pending_auth = max(0, self._pending_auth - 1)
+
+    def register(self, ws, authed: bool = False, loopback: bool = False) -> ClientSlot:
         loop = self._loop
         if loop is None:
             raise RuntimeError("live hub loop not bound")
-        slot = ClientSlot(self._next_id, ws, authed)
+        if len(self._slots) >= settings.max_ws_clients:
+            self._refused_full += 1
+            raise HubFull("too many live ws clients")
+        slot = ClientSlot(self._next_id, ws, authed, loopback)
         self._next_id += 1
         slot.gone = loop.create_future()
         self._slots[slot.id] = slot
@@ -366,12 +396,19 @@ class LiveHub:
     def auth_allowed(self, slot: ClientSlot) -> bool:
         if slot.authed:
             return True
-        return not settings.api_key and settings.bench_open_writes
+        return not settings.api_key and settings.bench_open_writes and slot.loopback
 
     @staticmethod
     def key_matches(api_key: str | None) -> bool:
         expected = settings.api_key
-        return bool(expected) and api_key == expected
+        if not expected or not isinstance(api_key, str):
+            return False
+        return hmac.compare_digest(api_key.encode("utf-8", "replace"),
+                                   expected.encode("utf-8", "replace"))
+
+    @staticmethod
+    def reads_gated() -> bool:
+        return settings.reads_require_key and bool(settings.api_key)
 
     def note_rejection(self, slot: ClientSlot) -> bool:
         return slot.rejections.record(self.now()) >= REJECTIONS_PER_MINUTE
@@ -419,12 +456,14 @@ class LiveHub:
         key = (msg.device_id, msg.channel)
         if key in self._inflight:
             return self._refuse(slot, msg, "channel busy")
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return self._refuse(slot, msg, "live hub stopping")
         inf = InFlight(None, msg.device_id, msg.channel, slot.id)
         self._inflight[key] = inf
-        loop = self._loop
 
-        def on_id(command_id):
-            loop.call_soon_threadsafe(self._bind_id, inf, command_id)
+        def on_id(command_id: int) -> None:
+            self.bind_id_threadsafe(inf, command_id)
 
         try:
             result = await asyncio.to_thread(self._create_row, msg.device_id, msg.channel,

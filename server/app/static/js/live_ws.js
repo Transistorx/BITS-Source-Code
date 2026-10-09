@@ -5,6 +5,7 @@
   var BACKOFF_MAX_MS = 10000;
   var PING_MS = 10000;
   var SILENT_LIMIT_MS = 25000;
+  var CLOSE_POLICY = 1008;
   var KEY_STORE = 'bits_live_ws_key';
 
   function wsUrl() {
@@ -118,12 +119,19 @@
       };
       ws.onmessage = function (event) { if (sock === ws) { onMessage(event); } };
       ws.onerror = function () { };
-      ws.onclose = function () {
+      ws.onclose = function (event) {
         if (sock !== ws) { return; }
         sock = null;
         stopPing();
         if (!opened) { failures++; }
         call('onLink', 'down', failures);
+        var code = event && typeof event.code === 'number' ? event.code : 0;
+        var reason = event && typeof event.reason === 'string' ? event.reason : '';
+        if (code === CLOSE_POLICY && /auth|api key/i.test(reason)) {
+          storeKey('');
+          call('onAuthRequired', reason);
+          if (closed) { return; }
+        }
         scheduleRetry();
       };
     }
@@ -135,9 +143,14 @@
         return sendObj({ type: 'cmd', device_id: deviceId, channel: channel, cmd: cmd });
       },
       sendAuth: function (key) {
-        var ok = sendAuth(key);
-        if (ok) { storeKey(key); }
-        return ok;
+        if (!key) { return false; }
+        storeKey(key);
+        if (!sock || sock.readyState !== 1) {
+          if (!closed && retryTimer !== null) { clearTimeout(retryTimer); retryTimer = null; }
+          if (!closed) { backoff = BACKOFF_START_MS; open(); }
+          return false;
+        }
+        return sendAuth(key);
       },
       hasKey: function () { return !!storedKey(); },
       close: function () {

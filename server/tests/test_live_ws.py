@@ -155,12 +155,16 @@ def test_REQ_WMQ_32_empty_api_key_refuses_commands_unless_bench_open(env, monkey
     assert sent_commands(env.pub, env.sender) == []
 
 
-def test_REQ_WMQ_32_empty_api_key_with_bench_open_writes_allows_commands(env, monkeypatch):
+def test_REQ_WMQ_32_empty_api_key_with_bench_open_writes_allows_commands_from_loopback(env, monkeypatch):
+    from starlette.testclient import TestClient
+    from app.main import app
     monkeypatch.setenv("API_KEY", "")
     monkeypatch.setenv("BENCH_OPEN_WRITES", "true")
-    with connect(env, headers={}, key=None) as p:
-        p.send(cmd(env.sender))
-        accepted(p)
+    with TestClient(app, client=("127.0.0.1", 50001)) as loopback:
+        with loopback.websocket_connect(URL) as ws:
+            p = Probe(ws)
+            p.send(cmd(env.sender))
+            accepted(p)
 
 
 @pytest.mark.parametrize("name", ["ESTOP", "PUMP_START", "zero", "", "CLEAR"])
