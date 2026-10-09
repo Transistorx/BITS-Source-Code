@@ -160,8 +160,8 @@ static void test_heartbeat(QueueHandle_t manager)
     mqtt_link_wgate_t gw;
     mqtt_link_wgate_init(&gw);
     (void)mqtt_link_wgate_hb_due(&gw, 0xFFFFFE00U, MQTT_LINK_WEIGHT_HB_PERIOD_MS);
-    test_check(!mqtt_link_wgate_hb_due(&gw, 0x000001DFU, MQTT_LINK_WEIGHT_HB_PERIOD_MS) &&
-                   mqtt_link_wgate_hb_due(&gw, 0x000001E0U, MQTT_LINK_WEIGHT_HB_PERIOD_MS),
+    test_check(!mqtt_link_wgate_hb_due(&gw, 0x000001E7U, MQTT_LINK_WEIGHT_HB_PERIOD_MS) &&
+                   mqtt_link_wgate_hb_due(&gw, 0x000001E8U, MQTT_LINK_WEIGHT_HB_PERIOD_MS),
                "REQ-WMQ-06_hb_wrap_safe");
 
     mqtt_link_wgate_t gd;
