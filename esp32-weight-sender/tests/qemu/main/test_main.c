@@ -445,16 +445,6 @@ void app_main(void)
      * pin parser output, the framing layer and the transport event contract
      * so a transport refactor cannot silently change behaviour. */
     test_mqtt_stats_run();
-    test_transport_golden_run();
-
-    /* ---- Board pin map (RS-485 / UART / strap-pad contract) ----
-     * Locks the single authoritative GPIO/UART mapping, console-UART
-     * protection, MAX13487E AutoDirection (no DE/RE pad), and the GPIO15
-     * strap-pad / single-scale channel selection. */
-    test_board_pinmap_run();
-
-    extern void test_responsiveness_run(void);
-    test_responsiveness_run();
 
     /* ---- MQTT link core + remote ZERO/TARE command framework ----
      * Topics, LWT/birth, backoff, non-blocking bounded queue, command validation,
@@ -467,6 +457,18 @@ void app_main(void)
 
     /* ---- Serial-log policy helpers (change detector, rate limiter, health line) ---- */
     test_log_util_run();
+
+    test_transport_golden_run();
+
+    /* ---- Board pin map (RS-485 / UART / strap-pad contract) ----
+     * Locks the single authoritative GPIO/UART mapping, console-UART
+     * protection, MAX13487E AutoDirection (no DE/RE pad), and the GPIO15
+     * strap-pad / single-scale channel selection. */
+    test_board_pinmap_run();
+
+    extern void test_responsiveness_run(void);
+    test_responsiveness_run();
+
     ESP_LOGI(TAG, "TEST_SUITE_END pass=%d fail=%d", s_pass, s_fail);
     vTaskDelay(pdMS_TO_TICKS(200));
 }

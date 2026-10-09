@@ -92,6 +92,6 @@ void test_responsiveness_run(void)
     test_check(weight_source_get(&sample)==WEIGHT_SOURCE_RESULT_NONE,"queued_stale_weight_never_becomes_fresh_or_zero");
 
     /* Per-channel diagnostics, CH1 selection and cross-channel isolation. */
-    test_diag_channels_run(manager);
     test_weight_mqtt_run(manager);
+    test_diag_channels_run(manager);
 }
