@@ -25,7 +25,7 @@ static void count_cb(const mqtt_item_t *item, void *ctx)
 /* Stand-in for mqtt_pub_task: loops while the link is RUNNING, then reports. */
 typedef struct {
     mqtt_link_lc_t *lc;
-    mqtt_link_queue_t *q;
+    mqtt_link_queues_t *q;
     atomic_bool done;
 } pub_ctx_t;
 
@@ -34,7 +34,7 @@ static void fake_pub_task(void *arg)
     pub_ctx_t *c = (pub_ctx_t *)arg;
     static mqtt_item_t item;
     while (mqtt_link_lc_running(c->lc)) {
-        (void)mqtt_link_queue_pop(c->q, &item, 20U);
+        (void)mqtt_link_queue_next(c->q, &item, 20U, 0U, 1000U);
     }
     atomic_store(&c->done, true);
     vTaskDelete(NULL);
@@ -74,8 +74,8 @@ void test_mqtt_stop_run(void)
     mqtt_link_lc_end_stop(&lc);
 
     /* ---- queue: bounded flush, deinit, no publish after stop ---- */
-    mqtt_link_queue_t q;
-    test_check(mqtt_link_queue_init(&q, MQTT_LINK_QUEUE_DEPTH), "stop_queue_init");
+    mqtt_link_queues_t q;
+    test_check(mqtt_link_queues_init(&q, MQTT_LINK_RX_DEPTH, MQTT_LINK_PUB_DEPTH), "stop_queue_init");
     for (int i = 0; i < 6; i++) {
         (void)mqtt_link_queue_push_pub(&q, "cas/x/commands/ack", "{}", (i % 2) ? 1 : 0, false);
     }
@@ -95,15 +95,17 @@ void test_mqtt_stop_run(void)
                    mqtt_link_queue_flush(&q, &s_scratch, 4U, NULL, NULL) == 0U,
                "stop_flush_rejects_null");
 
-    mqtt_link_queue_deinit(&q);
-    test_check(q.q == NULL, "stop_queue_deinit_clears_handle");
+    mqtt_link_queues_deinit(&q);
+    test_check(q.rx == NULL && q.pub == NULL && q.weight[0] == NULL && q.weight[1] == NULL &&
+                   q.doorbell == NULL,
+               "stop_queue_deinit_clears_handle");
     test_check(mqtt_link_queue_push_pub(&q, "cas/x/status", "{}", 1, true) == MQTT_ENQ_INVALID,
                "stop_no_publish_after_deinit");
     test_check(mqtt_link_queue_push_rx(&q, "t", 1U, "d", 1U, 1U, false, 0U) == MQTT_ENQ_INVALID,
                "stop_no_rx_after_deinit");
     test_check(mqtt_link_queue_pending(&q) == 0U, "stop_pending_zero_after_deinit");
-    mqtt_link_queue_deinit(&q);
-    mqtt_link_queue_deinit(NULL);
+    mqtt_link_queues_deinit(&q);
+    mqtt_link_queues_deinit(NULL);
     test_check(true, "stop_queue_deinit_is_idempotent");
 
     /* ---- pub task exits cleanly; clean restart; no leaks ---- */
@@ -114,7 +116,7 @@ void test_mqtt_stop_run(void)
         ctx.lc = &lc;
         ctx.q = &q;
         atomic_store(&ctx.done, false);
-        bool ok = mqtt_link_lc_start(&lc) && mqtt_link_queue_init(&q, MQTT_LINK_QUEUE_DEPTH) &&
+        bool ok = mqtt_link_lc_start(&lc) && mqtt_link_queues_init(&q, MQTT_LINK_RX_DEPTH, MQTT_LINK_PUB_DEPTH) &&
                   xTaskCreate(fake_pub_task, "fake_pub", 3072, &ctx, 2, NULL) == pdPASS;
         test_check(ok, "stop_cycle_start_ok");
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -127,7 +129,7 @@ void test_mqtt_stop_run(void)
         }
         test_check(atomic_load(&ctx.done) && waited < 200, "stop_pub_task_exits_promptly");
         vTaskDelay(pdMS_TO_TICKS(30)); /* let the idle task reap the deleted task */
-        mqtt_link_queue_deinit(&q);
+        mqtt_link_queues_deinit(&q);
         mqtt_link_lc_end_stop(&lc);
         test_check(mqtt_link_queue_push_pub(&q, "cas/x/status", "{}", 1, true) == MQTT_ENQ_INVALID,
                    "stop_cycle_no_publish_after_stop");

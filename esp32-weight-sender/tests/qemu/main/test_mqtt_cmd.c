@@ -195,8 +195,8 @@ static void test_core(void)
     test_check(strcmp(shown, "mqtt://192.168.137.1:1883") == 0, "mqtt_uri_without_userinfo_unchanged");
 
     /* Bounded queue: the event callback path. */
-    mqtt_link_queue_t q;
-    test_check(mqtt_link_queue_init(&q, 2), "mqtt_queue_init");
+    mqtt_link_queues_t q;
+    test_check(mqtt_link_queues_init(&q, 2, 2), "mqtt_queue_init");
     const char *tp = "cas/" DEV "/commands";
     const char *pl = "{\"command_id\":1}";
     test_check(mqtt_link_queue_push_rx(&q, tp, strlen(tp), pl, strlen(pl), strlen(pl), false, 77U) == MQTT_ENQ_OK,
@@ -210,15 +210,17 @@ static void test_core(void)
     test_check(mqtt_link_queue_push_rx(&q, tp, strlen(tp), big, sizeof(big), sizeof(big), false, 1U) == MQTT_ENQ_TOO_BIG,
                "mqtt_rx_oversize_refused");
     mqtt_item_t *it = pvPortMalloc(sizeof(*it));
-    test_check(mqtt_link_queue_pop(&q, it, 0) && it->kind == MQTT_ITEM_RX && it->recv_ms == 77U &&
+    test_check(mqtt_link_queue_next(&q, it, 0, 0U, 1000U) && it->kind == MQTT_ITEM_RX && it->recv_ms == 77U &&
                    strcmp(it->topic, tp) == 0 && strcmp(it->data, pl) == 0 && !it->retain,
                "mqtt_rx_item_roundtrip");
-    test_check(!mqtt_link_queue_pop(&q, it, 0), "mqtt_queue_empty_after_pop");
+    test_check(!mqtt_link_queue_next(&q, it, 0, 0U, 1000U), "mqtt_queue_empty_after_pop");
 
     /* Saturate, then prove the callback path never waits. A blocking send would
      * cost at least one tick per rejected push. */
-    mqtt_link_queue_push_pub(&q, "cas/x/telemetry/status", "{}", 0, false);
-    mqtt_link_queue_push_pub(&q, "cas/x/telemetry/status", "{}", 0, false);
+    (void)mqtt_link_queue_push_rx(&q, tp, strlen(tp), pl, strlen(pl), strlen(pl), false, 1U);
+    (void)mqtt_link_queue_push_rx(&q, tp, strlen(tp), pl, strlen(pl), strlen(pl), false, 1U);
+    (void)mqtt_link_queue_push_pub(&q, "cas/x/telemetry/status", "{}", 0, false);
+    (void)mqtt_link_queue_push_pub(&q, "cas/x/telemetry/status", "{}", 0, false);
     int64_t t0 = esp_timer_get_time();
     int full = 0;
     for (int i = 0; i < 50; i++) {
@@ -228,9 +230,9 @@ static void test_core(void)
     int64_t us = esp_timer_get_time() - t0;
     test_check(full == 100, "mqtt_full_queue_drops_every_push");
     test_check(us < 100000, "mqtt_publish_callback_never_blocks");
-    test_check(q.dropped_full >= 100U, "mqtt_full_queue_counts_drops");
+    test_check(q.rx_dropped_full + q.pub_dropped_full >= 100U, "mqtt_full_queue_counts_drops");
     vPortFree(it);
-    vQueueDelete(q.q);
+    mqtt_link_queues_deinit(&q);
 }
 
 static void test_commands(void)

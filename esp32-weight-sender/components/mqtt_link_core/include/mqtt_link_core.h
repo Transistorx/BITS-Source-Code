@@ -20,6 +20,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,7 +29,11 @@ extern "C" {
 #define MQTT_LINK_DEVICE_ID_MAX  64U
 #define MQTT_LINK_TOPIC_MAX      96U
 #define MQTT_LINK_PAYLOAD_MAX    512U
-#define MQTT_LINK_QUEUE_DEPTH    8U
+#define MQTT_LINK_RX_DEPTH       4U
+#define MQTT_LINK_PUB_DEPTH      6U
+#define MQTT_LINK_WEIGHT_SLOT_CTL 0U
+#define MQTT_LINK_WEIGHT_SLOT_TEL 1U
+#define MQTT_LINK_WEIGHT_SLOTS   2U
 #define MQTT_LINK_ENV_MAX        256U  /* birth and weight/ctl size limit */
 
 #define MQTT_LINK_BACKOFF_MIN_MS 1000U
@@ -167,42 +172,43 @@ typedef enum {
 } mqtt_enq_result_t;
 
 typedef struct {
-    QueueHandle_t q;
-    volatile uint32_t dropped_full;
-    volatile uint32_t dropped_other;
-} mqtt_link_queue_t;
+    QueueHandle_t rx;
+    QueueHandle_t pub;
+    QueueHandle_t weight[MQTT_LINK_WEIGHT_SLOTS];
+    SemaphoreHandle_t doorbell;
+    _Atomic uint32_t rx_dropped_full;
+    _Atomic uint32_t pub_dropped_full;
+    _Atomic uint32_t weight_overwritten;
+    _Atomic uint32_t weight_dropped_stale;
+    _Atomic uint32_t dropped_other;
+} mqtt_link_queues_t;
 
-bool mqtt_link_queue_init(mqtt_link_queue_t *queue, size_t depth);
+bool mqtt_link_queues_init(mqtt_link_queues_t *q, size_t rx_depth, size_t pub_depth);
 
-/*
- * Called from the esp-mqtt event callback. Copies into the bounded queue with
- * a ZERO timeout: no JSON, no logging, no blocking. A full queue drops.
- * data_len < total_len (fragment) and retain=1 are refused here.
- */
-mqtt_enq_result_t mqtt_link_queue_push_rx(mqtt_link_queue_t *queue,
+mqtt_enq_result_t mqtt_link_queue_push_rx(mqtt_link_queues_t *q,
                                           const char *topic, size_t topic_len,
                                           const char *data, size_t data_len,
                                           size_t total_len, bool retain,
                                           uint32_t now_ms);
 
-/* Outbound enqueue; also zero-timeout. */
-mqtt_enq_result_t mqtt_link_queue_push_pub(mqtt_link_queue_t *queue,
+mqtt_enq_result_t mqtt_link_queue_push_pub(mqtt_link_queues_t *q,
                                            const char *topic, const char *data,
                                            int qos, bool retain);
 
-bool mqtt_link_queue_pop(mqtt_link_queue_t *queue, mqtt_item_t *out, uint32_t timeout_ms);
+mqtt_enq_result_t mqtt_link_queue_put_weight(mqtt_link_queues_t *q, unsigned slot,
+                                             const char *topic, const char *data,
+                                             uint32_t now_ms);
 
-size_t mqtt_link_queue_pending(const mqtt_link_queue_t *queue);
+bool mqtt_link_queue_next(mqtt_link_queues_t *q, mqtt_item_t *out, uint32_t timeout_ms,
+                          uint32_t now_ms, uint32_t stale_ms);
 
-/* Pops at most max_items (zero timeout), handing each to cb via the caller's
- * scratch item. Returns the number popped. Bounded so a shutdown never drains
- * an unbounded backlog. */
+size_t mqtt_link_queue_pending(const mqtt_link_queues_t *q);
+
 typedef void (*mqtt_link_flush_cb)(const mqtt_item_t *item, void *ctx);
-size_t mqtt_link_queue_flush(mqtt_link_queue_t *queue, mqtt_item_t *scratch, size_t max_items,
+size_t mqtt_link_queue_flush(mqtt_link_queues_t *q, mqtt_item_t *scratch, size_t max_items,
                              mqtt_link_flush_cb cb, void *ctx);
 
-/* Frees the queue. Idempotent and NULL-safe. Afterwards every push is INVALID. */
-void mqtt_link_queue_deinit(mqtt_link_queue_t *queue);
+void mqtt_link_queues_deinit(mqtt_link_queues_t *q);
 
 /* Link lifecycle: IDLE -> RUNNING -> STOPPING -> IDLE. begin_stop succeeds once
  * per run, so stop is idempotent; start is refused until stop has finished. */

@@ -41,7 +41,7 @@ static const char *TAG = "MQTT";
 #define MQTT_OUTBOX_LIMIT   8192U
 #define MQTT_POLL_MS        100U
 
-static mqtt_link_queue_t s_queue;
+static mqtt_link_queues_t s_queues;
 static esp_mqtt_client_handle_t s_client;
 static mqtt_link_command_cb s_command_cb;
 static char s_device_id[MQTT_LINK_DEVICE_ID_MAX + 1U];
@@ -73,7 +73,7 @@ static atomic_int s_err_code;
 /* Stop budget: pub task exit + flush + graceful PUBACK wait stay under ~1 s. */
 #define MQTT_STOP_TASK_WAIT_MS 300U
 #define MQTT_STOP_ACK_WAIT_MS  400U
-#define MQTT_STOP_FLUSH_MAX    MQTT_LINK_QUEUE_DEPTH
+#define MQTT_STOP_FLUSH_MAX    (MQTT_LINK_RX_DEPTH + MQTT_LINK_PUB_DEPTH + MQTT_LINK_WEIGHT_SLOTS)
 
 void mqtt_link_set_command_handler(mqtt_link_command_cb cb)
 {
@@ -91,9 +91,9 @@ void mqtt_link_get_stats(mqtt_link_stats_t *out)
     out->connected = atomic_load(&s_connected);
     out->published = atomic_load(&s_published_count);
     out->publish_failed = atomic_load(&s_publish_failed);
-    out->queue_depth = (uint32_t)mqtt_link_queue_pending(&s_queue);
-    out->dropped_full = s_queue.dropped_full;
-    out->dropped_other = s_queue.dropped_other;
+    out->queue_depth = (uint32_t)mqtt_link_queue_pending(&s_queues);
+    out->dropped_full = atomic_load(&s_queues.rx_dropped_full) + atomic_load(&s_queues.pub_dropped_full);
+    out->dropped_other = atomic_load(&s_queues.dropped_other);
     out->dropped_offline = atomic_load(&s_dropped_offline);
 }
 
@@ -120,23 +120,33 @@ void mqtt_link_set_identity(const char *fw, const char *role)
     if (role != NULL) s_role = role;
 }
 
-bool mqtt_link_publish(const char *topic_suffix, const char *json, int qos, bool retain)
+static bool publish_gate(char *topic, size_t cap, const char *topic_suffix, int qos)
 {
-    char topic[MQTT_LINK_TOPIC_MAX];
     if (!s_lc_ready || !mqtt_link_lc_running(&s_lc) ||
-        !mqtt_link_topic(topic, sizeof(topic), s_device_id, topic_suffix)) {
+        !mqtt_link_topic(topic, cap, s_device_id, topic_suffix)) {
         return false;
     }
-    /* QoS 0 is never accumulated for an offline broker: drop at the door. */
     if (qos == 0 && !atomic_load(&s_connected)) {
         atomic_fetch_add(&s_dropped_offline, 1U);
         return false;
     }
-    return mqtt_link_queue_push_pub(&s_queue, topic, json, qos, retain) == MQTT_ENQ_OK;
+    return true;
 }
 
-/* Called by the weight_tx task for every valid, real CAS sample. Zero-timeout
- * enqueue only; a full queue or a down broker drops (counted), never waits. */
+bool mqtt_link_publish(const char *topic_suffix, const char *json, int qos, bool retain)
+{
+    char topic[MQTT_LINK_TOPIC_MAX];
+    if (!publish_gate(topic, sizeof(topic), topic_suffix, qos)) return false;
+    return mqtt_link_queue_push_pub(&s_queues, topic, json, qos, retain) == MQTT_ENQ_OK;
+}
+
+static bool weight_put(unsigned slot, const char *topic_suffix, const char *json, uint32_t now_ms)
+{
+    char topic[MQTT_LINK_TOPIC_MAX];
+    if (!publish_gate(topic, sizeof(topic), topic_suffix, 0)) return false;
+    return mqtt_link_queue_put_weight(&s_queues, slot, topic, json, now_ms) == MQTT_ENQ_OK;
+}
+
 void mqtt_link_weight_frame(const mqtt_link_weight_t *w, uint32_t now_ms)
 {
     char json[320];
@@ -147,14 +157,14 @@ void mqtt_link_weight_frame(const mqtt_link_weight_t *w, uint32_t now_ms)
     if (mqtt_link_wgate_new_frame(&s_wgate, w->src_uart, w->cas_seq)) {
         size_t n = mqtt_link_weight_json(json, sizeof(json), mqtt_link_boot_id(), s_wgate.seq_ctl,
                                          w, false);
-        if (n != 0U && mqtt_link_publish(MQTT_SUFFIX_WEIGHT_CTL, json, 0, false)) {
+        if (n != 0U && weight_put(MQTT_LINK_WEIGHT_SLOT_CTL, MQTT_SUFFIX_WEIGHT_CTL, json, now_ms)) {
             s_wgate.seq_ctl++;
         }
     }
     if (mqtt_link_wgate_tel_due(&s_wgate, now_ms, MQTT_LINK_WEIGHT_TEL_PERIOD_MS)) {
         size_t n = mqtt_link_weight_json(json, sizeof(json), mqtt_link_boot_id(), s_wgate.seq_tel,
                                          w, true);
-        if (n != 0U && mqtt_link_publish(MQTT_SUFFIX_WEIGHT_TEL, json, 0, false)) {
+        if (n != 0U && weight_put(MQTT_LINK_WEIGHT_SLOT_TEL, MQTT_SUFFIX_WEIGHT_TEL, json, now_ms)) {
             s_wgate.seq_tel++;
         }
     }
@@ -196,10 +206,10 @@ static void on_mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *da
          * events is refused whole by the core (data_len != total_len). */
         if (ev->topic != NULL && ev->topic_len > 0 && ev->data_len >= 0 &&
             ev->total_data_len >= 0) {
-            (void)mqtt_link_queue_push_rx(&s_queue, ev->topic, (size_t)ev->topic_len,
-                                          ev->data, (size_t)ev->data_len,
-                                          (size_t)ev->total_data_len, ev->retain != 0,
-                                          (uint32_t)(esp_timer_get_time() / 1000));
+            (void)mqtt_link_queue_push_rx(&s_queues, ev->topic, (size_t)ev->topic_len,
+                                           ev->data, (size_t)ev->data_len,
+                                           (size_t)ev->total_data_len, ev->retain != 0,
+                                           (uint32_t)(esp_timer_get_time() / 1000));
         }
         break;
     default:
@@ -273,7 +283,9 @@ static void mqtt_pub_task(void *arg)
     log_ratelimit_init(&fail_rl);
 
     while (mqtt_link_lc_running(&s_lc)) {
-        bool got = mqtt_link_queue_pop(&s_queue, &item, MQTT_POLL_MS);
+        uint32_t poll_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        bool got = mqtt_link_queue_next(&s_queues, &item, MQTT_POLL_MS, poll_ms,
+                                        MQTT_LINK_WEIGHT_TEL_PERIOD_MS);
 
         if (atomic_exchange(&s_evt_connected, false)) {
             attempt = 0U;
@@ -348,7 +360,7 @@ esp_err_t mqtt_link_stop(void)
 
     if (s_client != NULL && atomic_load(&s_connected)) {
         static mqtt_item_t scratch;
-        (void)mqtt_link_queue_flush(&s_queue, &scratch, MQTT_STOP_FLUSH_MAX, flush_cb, NULL);
+        (void)mqtt_link_queue_flush(&s_queues, &scratch, MQTT_STOP_FLUSH_MAX, flush_cb, NULL);
 
         atomic_store(&s_published_id, -1);
         int id = esp_mqtt_client_publish(s_client, s_presence.birth_topic,
@@ -369,7 +381,7 @@ esp_err_t mqtt_link_stop(void)
         (void)esp_mqtt_client_destroy(s_client); /* frees the outbox and buffers */
         s_client = NULL;
     }
-    mqtt_link_queue_deinit(&s_queue);
+    mqtt_link_queues_deinit(&s_queues);
     atomic_store(&s_connected, false);
     mqtt_link_lc_end_stop(&s_lc);
     ESP_LOGI(TAG, "stopped");
@@ -420,7 +432,7 @@ esp_err_t mqtt_link_start(void)
                                       s_role, s_scale_id)) {
         ESP_LOGW(TAG, "birth envelope not built; plain birth used");
     }
-    if (!mqtt_link_queue_init(&s_queue, MQTT_LINK_QUEUE_DEPTH)) return ESP_ERR_NO_MEM;
+    if (!mqtt_link_queues_init(&s_queues, MQTT_LINK_RX_DEPTH, MQTT_LINK_PUB_DEPTH)) return ESP_ERR_NO_MEM;
 
     esp_mqtt_client_config_t cfg = {
         .broker.address.uri = CONFIG_MQTT_LINK_BROKER_URI,
@@ -454,14 +466,14 @@ esp_err_t mqtt_link_start(void)
 
     s_client = esp_mqtt_client_init(&cfg);
     if (s_client == NULL) {
-        mqtt_link_queue_deinit(&s_queue);
+        mqtt_link_queues_deinit(&s_queues);
         return ESP_FAIL;
     }
     esp_err_t err = esp_mqtt_client_register_event(s_client, MQTT_EVENT_ANY, on_mqtt_event, NULL);
     if (err != ESP_OK) {
         (void)esp_mqtt_client_destroy(s_client);
         s_client = NULL;
-        mqtt_link_queue_deinit(&s_queue);
+        mqtt_link_queues_deinit(&s_queues);
         return err;
     }
 
@@ -471,7 +483,7 @@ esp_err_t mqtt_link_start(void)
         (void)mqtt_link_lc_begin_stop(&s_lc);
         (void)esp_mqtt_client_destroy(s_client);
         s_client = NULL;
-        mqtt_link_queue_deinit(&s_queue);
+        mqtt_link_queues_deinit(&s_queues);
         mqtt_link_lc_end_stop(&s_lc);
         return ESP_ERR_NO_MEM;
     }

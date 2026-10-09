@@ -35,7 +35,7 @@ static mqtt_link_weight_t sample_w(uint32_t cas_seq)
 
 /* Minimal publish model of mqtt_link_weight_frame: gate + build + zero-timeout
  * enqueue; the sequence advances only when the enqueue succeeded. */
-static bool offer(mqtt_link_wgate_t *g, mqtt_link_queue_t *q, const mqtt_link_weight_t *w,
+static bool offer(mqtt_link_wgate_t *g, mqtt_link_queues_t *q, const mqtt_link_weight_t *w,
                   bool valid_real)
 {
     char json[MQTT_LINK_ENV_MAX + 1U];
@@ -130,8 +130,8 @@ void test_mqtt_env_run(void)
     /* dedupe, retain=false, drop-when-full, sequence */
     mqtt_link_wgate_t g;
     mqtt_link_wgate_init(&g);
-    mqtt_link_queue_t q;
-    test_check(mqtt_link_queue_init(&q, 2), "env_queue_init");
+    mqtt_link_queues_t q;
+    test_check(mqtt_link_queues_init(&q, 1, 2), "env_queue_init");
     mqtt_link_weight_t f1 = sample_w(10U);
     test_check(offer(&g, &q, &f1, true), "env_first_frame_published");
     test_check(!offer(&g, &q, &f1, true), "env_same_cas_seq_deduped");
@@ -139,7 +139,7 @@ void test_mqtt_env_run(void)
     mqtt_link_weight_t f2 = sample_w(11U);
     test_check(offer(&g, &q, &f2, true) && g.seq_ctl == 2U, "env_new_cas_seq_published_seq_increments");
     mqtt_item_t *it = pvPortMalloc(sizeof(*it));
-    test_check(it != NULL && mqtt_link_queue_pop(&q, it, 0) && it->kind == MQTT_ITEM_PUB && it->len <= MQTT_LINK_ENV_MAX &&
+    test_check(it != NULL && mqtt_link_queue_next(&q, it, 0, 0U, 1000U) && it->kind == MQTT_ITEM_PUB && it->len <= MQTT_LINK_ENV_MAX &&
                    it->qos == 0 && !it->retain && strcmp(it->topic, "cas/" DEV "/weight/ctl") == 0 &&
                    strstr(it->data, "\"seq\":0,") != NULL,
                "env_ctl_qos0_retain_false_topic");
@@ -150,7 +150,7 @@ void test_mqtt_env_run(void)
     bool a3 = offer(&g, &q, &f3, true);   /* queue holds f2 + f3: full */
     bool a4 = offer(&g, &q, &f4, true);   /* dropped */
     bool a5 = offer(&g, &q, &f5, true);   /* dropped */
-    test_check(a3 && !a4 && !a5 && q.dropped_full >= 2U, "env_full_queue_drops_and_counts");
+    test_check(a3 && !a4 && !a5 && q.pub_dropped_full >= 2U, "env_full_queue_drops_and_counts");
     test_check(g.seq_ctl == 3U, "env_seq_not_consumed_by_drop");
 
     /* No publish for stale/invalid data */
@@ -164,20 +164,20 @@ void test_mqtt_env_run(void)
     /* Single seq counter across both UARTs; dedupe by cas_seq stays per UART. */
     mqtt_link_wgate_t g5;
     mqtt_link_wgate_init(&g5);
-    mqtt_link_queue_t q5;
-    test_check(mqtt_link_queue_init(&q5, 4), "env_queue5_init");
+    mqtt_link_queues_t q5;
+    test_check(mqtt_link_queues_init(&q5, 1, 4), "env_queue5_init");
     mqtt_link_weight_t u1 = sample_w(1U);
     mqtt_link_weight_t u2 = sample_w(1U);
     u2.src_uart = 2U;
     mqtt_item_t *it5 = pvPortMalloc(sizeof(*it5));
     test_check(offer(&g5, &q5, &u1, true) && offer(&g5, &q5, &u2, true) && g5.seq_ctl == 2U &&
-                   it5 != NULL && mqtt_link_queue_pop(&q5, it5, 0) && strstr(it5->data, "\"seq\":0,") &&
+                   it5 != NULL && mqtt_link_queue_next(&q5, it5, 0, 0U, 1000U) && strstr(it5->data, "\"seq\":0,") &&
                    strstr(it5->data, "\"src_uart\":\"UART1\"") &&
-                   mqtt_link_queue_pop(&q5, it5, 0) && strstr(it5->data, "\"seq\":1,") &&
+                   mqtt_link_queue_next(&q5, it5, 0, 0U, 1000U) && strstr(it5->data, "\"seq\":1,") &&
                    strstr(it5->data, "\"src_uart\":\"UART2\""),
                "env_single_seq_counter_across_uarts");
     vPortFree(it5);
-    mqtt_link_queue_deinit(&q5);
+    mqtt_link_queues_deinit(&q5);
 
     /* Dedupe is per UART: equal cas_seq on UART1 and UART2 are both new. */
     mqtt_link_wgate_t g4;
@@ -187,7 +187,7 @@ void test_mqtt_env_run(void)
                    !mqtt_link_wgate_new_frame(&g4, 3U, 6U),
                "env_dedupe_per_uart");
     vPortFree(it);
-    mqtt_link_queue_deinit(&q);
+    mqtt_link_queues_deinit(&q);
 
     /* telemetry/weight reduced stream */
     mqtt_link_wgate_t g3;
