@@ -1,6 +1,9 @@
 #include "provisioning.h"
 #include "nvs_config.h"
 #include "app_error.h"
+#include "broker_cfg.h"
+#include "mqtt_link_core.h"
+#include "nvs.h"
 #include "led_status.h"
 #include "esp_event.h"
 #include "esp_http_server.h"
@@ -28,7 +31,8 @@ static const char *TAG = "PROV";
 #define AP_DEFAULT_IP    "192.168.4.1"
 #define DNS_PORT         53
 #define DNS_BUF_SIZE     512U
-#define BODY_BUF_SIZE    512U
+#define BODY_BUF_SIZE    1024U
+#define FIELD_RAW_SIZE   (3U * BROKER_CFG_URI_MAX + 4U)
 #define MAX_SCAN_APS     20U
 #define HTML_BUF_SIZE    14336U
 
@@ -53,6 +57,22 @@ static scan_ap_t         s_scan_results[MAX_SCAN_APS];
 static wifi_ap_record_t  s_raw_scan[MAX_SCAN_APS];
 static uint16_t          s_scan_count = 0U;
 static char              s_html_buf[HTML_BUF_SIZE];
+
+typedef struct {
+    char body[BODY_BUF_SIZE];
+    char raw[FIELD_RAW_SIZE];
+    char slot_str[4U];
+    char ssid[33U];
+    char pass[65U];
+    char mqtt_uri[BROKER_CFG_URI_MAX + 1U];
+    char mqtt_user[BROKER_CFG_USER_MAX + 1U];
+    char mqtt_pass[BROKER_CFG_PASS_MAX + 1U];
+    char mqtt_clear[4U];
+    broker_cfg_rec_t rec;
+} prov_form_t;
+
+static prov_form_t s_form;
+static broker_cfg_rec_t s_page_rec;
 
 /* --------------------------------------------------------------------------
  * HTML — assembled per request in build_html() from four parts:
@@ -165,10 +185,27 @@ static const char s_html_p2[] =
     "<div class=\"pr\"><input type=\"password\" name=\"password\" id=\"pw\""
     " autocomplete=\"new-password\" placeholder=\"Wi-Fi password\" maxlength=\"64\">"
     "<button type=\"button\" class=\"eye\" id=\"eye\" onclick=\"tpw()\">"
-    "Show</button></div></div>"
+    "Show</button></div></div>";
+
+static const char s_html_p2b[] =
     "<button type=\"submit\" class=\"cb\" id=\"cb\" style=\"margin-top:16px;\">Save & Restart</button>"
     "</form></div>"
     "<script>\n";
+
+static const char s_html_mqtt[] =
+    "<div class=\"fl\">MQTT broker</div>"
+    "<div class=\"dev\">Stored config: <b>%s</b>%s%s</div>"
+    "<div class=\"fl\">Broker URI (blank = no change)</div><div class=\"pr\">"
+    "<input name=\"mqtt_uri\" maxlength=\"95\" autocomplete=\"off\" "
+    "placeholder=\"mqtt://host:1883\" value=\"%s\"></div>"
+    "<div class=\"fl\">Broker username (ACL expects dev_&lt;device id&gt;)</div><div class=\"pr\">"
+    "<input name=\"mqtt_user\" maxlength=\"31\" autocomplete=\"off\" "
+    "placeholder=\"dev_%s\" value=\"%s\"></div>"
+    "<div class=\"fl\">Broker password (blank = keep stored)</div><div class=\"pr\">"
+    "<input type=\"password\" name=\"mqtt_pass\" maxlength=\"63\" autocomplete=\"new-password\" "
+    "placeholder=\"not shown\"></div>"
+    "<label class=\"fl\"><input type=\"checkbox\" name=\"mqtt_clear\" value=\"1\"> "
+    "Clear stored broker config (use built-in)</label>";
 
 /* p3: JS — builds the scrollable network list from d[] (sorted strongest
  * first), pre-selects DEF_SSID and pre-fills DEF_PASS when present, toggles
@@ -323,6 +360,84 @@ static void do_scan(void)
  * build_html — generate the portal page into s_html_buf.
  * Called on every GET / and after every /scan redirect.
  * -------------------------------------------------------------------------- */
+static void html_attr_escape(const char *src, char *dst, size_t dst_size)
+{
+    size_t out = 0U;
+    if ((dst == NULL) || (dst_size == 0U)) return;
+    for (size_t i = 0U; (src != NULL) && (src[i] != '\0'); i++) {
+        const char *rep = NULL;
+        unsigned char c = (unsigned char)src[i];
+        switch (c) {
+        case '&': rep = "&amp;"; break;
+        case '<': rep = "&lt;"; break;
+        case '>': rep = "&gt;"; break;
+        case '"': rep = "&quot;"; break;
+        case '\'': rep = "&#39;"; break;
+        default: break;
+        }
+        if ((c < 0x20U) || (c > 0x7EU)) continue;
+        if (rep != NULL) {
+            size_t n = strlen(rep);
+            if (out + n >= dst_size) break;
+            memcpy(dst + out, rep, n);
+            out += n;
+        } else {
+            if (out + 1U >= dst_size) break;
+            dst[out++] = (char)c;
+        }
+    }
+    dst[out] = '\0';
+}
+
+static broker_cfg_src_t mqtt_rec_load(broker_cfg_rec_t *rec)
+{
+    static uint8_t blob[sizeof(broker_cfg_rec_t)];
+    size_t len = sizeof(blob);
+    broker_cfg_src_t src;
+    esp_err_t err = nvs_config_get_blob(NVS_KEY_MQTT_CFG, blob, &len);
+
+    broker_cfg_wipe(rec);
+    if (err == ESP_OK) {
+        src = broker_cfg_decode(blob, len, rec);
+    } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+        src = BROKER_CFG_SRC_FALLBACK_ABSENT;
+    } else if (err == ESP_ERR_NVS_INVALID_LENGTH) {
+        src = BROKER_CFG_SRC_FALLBACK_VERSION;
+    } else {
+        src = BROKER_CFG_SRC_FALLBACK_INVALID;
+    }
+    broker_cfg_wipe_bytes(blob, sizeof(blob));
+    return src;
+}
+
+static size_t append_mqtt_block(size_t pos, size_t rem, const char *device_id)
+{
+    char uri_esc[BROKER_CFG_URI_MAX * 6U + 1U] = {0};
+    char user_esc[BROKER_CFG_USER_MAX * 6U + 1U] = {0};
+    char shown[BROKER_CFG_URI_MAX + 1U] = {0};
+    broker_cfg_src_t src = mqtt_rec_load(&s_page_rec);
+    const char *note = "";
+
+    if (src == BROKER_CFG_SRC_NVS) {
+        if (s_page_rec.uri[0] == '\0') {
+            note = " (empty URI: built-in broker)";
+        } else {
+            mqtt_link_uri_redact(shown, sizeof(shown), s_page_rec.uri);
+            html_attr_escape(shown, uri_esc, sizeof(uri_esc));
+            note = " ";
+        }
+        html_attr_escape(s_page_rec.user, user_esc, sizeof(user_esc));
+    } else {
+        note = " (built-in broker)";
+    }
+    int n = snprintf(s_html_buf + pos, rem, s_html_mqtt, broker_cfg_src_name(src), note, uri_esc,
+                     uri_esc, device_id, user_esc);
+    broker_cfg_wipe(&s_page_rec);
+    broker_cfg_wipe_bytes(shown, sizeof(shown));
+    if ((n > 0) && ((size_t)n < rem)) return (size_t)n;
+    return 0U;
+}
+
 static void build_html(void)
 {
     char     esc[200U]   = {0};
@@ -355,6 +470,15 @@ static void build_html(void)
 
     /* p2: form skeleton up to <script> */
     n = snprintf(s_html_buf + pos, rem, "%s", s_html_p2);
+    if ((n > 0) && ((size_t)n < rem)) { pos += (size_t)n; rem -= (size_t)n; }
+
+    {
+        size_t added = append_mqtt_block(pos, rem, (device_id[0] != '\0') ? device_id : "");
+        pos += added;
+        rem -= added;
+    }
+
+    n = snprintf(s_html_buf + pos, rem, "%s", s_html_p2b);
     if ((n > 0) && ((size_t)n < rem)) { pos += (size_t)n; rem -= (size_t)n; }
 
     /* Prefill vars + scan-results array (escaped for the <script> context) */
@@ -449,60 +573,177 @@ static esp_err_t http_get_redirect(httpd_req_t *req)
 /* --------------------------------------------------------------------------
  * HTTP handler: POST /save
  * -------------------------------------------------------------------------- */
+typedef enum {
+    FIELD_USER = 0,
+    FIELD_PASS
+} field_kind_t;
+
+static bool field_chars_ok(const char *s, field_kind_t kind)
+{
+    for (size_t i = 0U; s[i] != '\0'; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (kind == FIELD_USER) {
+            if ((isalnum(c) == 0) && (c != '.') && (c != '_') && (c != '-')) return false;
+        } else if ((c < 0x20U) || (c > 0x7EU)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static size_t url_decoded_len(const char *src)
+{
+    size_t n = 0U;
+    for (size_t i = 0U; src[i] != '\0'; n++) {
+        if ((src[i] == '%') && (isxdigit((unsigned char)src[i + 1U]) != 0) &&
+            (isxdigit((unsigned char)src[i + 2U]) != 0)) {
+            i += 3U;
+        } else {
+            i++;
+        }
+    }
+    return n;
+}
+
+static esp_err_t form_field(const char *key, char *dst, size_t dst_len, bool strict)
+{
+    memset(s_form.raw, 0, sizeof(s_form.raw));
+    dst[0] = '\0';
+    esp_err_t err = httpd_query_key_value(s_form.body, key, s_form.raw, sizeof(s_form.raw));
+    if (err == ESP_ERR_NOT_FOUND) return ESP_OK;
+    if (err != ESP_OK) return strict ? ESP_ERR_INVALID_SIZE : ESP_OK;
+    if (strict && (url_decoded_len(s_form.raw) >= dst_len)) return ESP_ERR_INVALID_SIZE;
+    url_decode(dst, dst_len, s_form.raw);
+    return ESP_OK;
+}
+
+static esp_err_t mqtt_apply(const char **why)
+{
+    esp_err_t ret = ESP_OK;
+    char shown[BROKER_CFG_URI_MAX + 1U] = {0};
+    broker_cfg_src_t stored;
+
+    *why = NULL;
+    if (s_form.mqtt_clear[0] == '1') {
+        ret = nvs_config_erase_key(NVS_KEY_MQTT_CFG);
+        if (ret != ESP_OK) *why = "NVS erase failed";
+        else ESP_LOGI(TAG, "mqtt_cfg cleared; built-in broker config applies after restart");
+        goto cleanup;
+    }
+    if (s_form.mqtt_uri[0] == '\0') {
+        if ((s_form.mqtt_user[0] != '\0') || (s_form.mqtt_pass[0] != '\0')) {
+            ret = ESP_ERR_INVALID_ARG;
+            *why = "Broker URI required when a username or password is given";
+        }
+        goto cleanup;
+    }
+    if (!broker_cfg_uri_valid(s_form.mqtt_uri)) {
+        ret = ESP_ERR_INVALID_ARG;
+        *why = "Invalid broker URI (mqtt://host[:port] or mqtts://host[:port], no credentials)";
+        goto cleanup;
+    }
+    if (!field_chars_ok(s_form.mqtt_user, FIELD_USER)) {
+        ret = ESP_ERR_INVALID_ARG;
+        *why = "Username may contain only letters, digits, '.', '_' and '-'";
+        goto cleanup;
+    }
+    if (!field_chars_ok(s_form.mqtt_pass, FIELD_PASS)) {
+        ret = ESP_ERR_INVALID_ARG;
+        *why = "Password must be printable ASCII";
+        goto cleanup;
+    }
+    stored = mqtt_rec_load(&s_form.rec);
+    if ((s_form.mqtt_pass[0] == '\0') && (stored == BROKER_CFG_SRC_NVS)) {
+        memcpy(s_form.mqtt_pass, s_form.rec.pass, sizeof(s_form.mqtt_pass));
+        s_form.mqtt_pass[sizeof(s_form.mqtt_pass) - 1U] = '\0';
+    }
+    if (!broker_cfg_encode(&s_form.rec, s_form.mqtt_uri, s_form.mqtt_user, s_form.mqtt_pass)) {
+        ret = ESP_ERR_INVALID_ARG;
+        *why = "Broker config could not be encoded";
+        goto cleanup;
+    }
+    ret = nvs_config_set_blob(NVS_KEY_MQTT_CFG, &s_form.rec, sizeof(s_form.rec));
+    if (ret != ESP_OK) {
+        *why = "NVS write failed (broker config)";
+        goto cleanup;
+    }
+    mqtt_link_uri_redact(shown, sizeof(shown), s_form.mqtt_uri);
+    ESP_LOGI(TAG, "Saved mqtt_cfg uri=%s auth=%s", shown, (s_form.mqtt_user[0] != '\0') ? "yes" : "no");
+
+cleanup:
+    broker_cfg_wipe(&s_form.rec);
+    broker_cfg_wipe_bytes(shown, sizeof(shown));
+    return ret;
+}
+
 static esp_err_t http_post_save(httpd_req_t *req)
 {
-    char body[BODY_BUF_SIZE] = {0};
-    char ssid_raw[97U]       = {0};
-    char pass_raw[193U]      = {0};
-    char slot_str[4U]        = {0};
-    char ssid[33U]           = {0};
-    char pass[65U]           = {0};
+    esp_err_t ret = ESP_FAIL;
+    const char *why = NULL;
 
-    int received = httpd_req_recv(req, body, sizeof(body) - 1U);
+    broker_cfg_wipe_bytes(&s_form, sizeof(s_form));
+    int received = httpd_req_recv(req, s_form.body, sizeof(s_form.body) - 1U);
     if (received <= 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
-        return ESP_FAIL;
+        goto cleanup;
     }
-    body[received] = '\0';
+    s_form.body[received] = '\0';
 
-    (void)httpd_query_key_value(body, "slot",     slot_str, sizeof(slot_str));
-    (void)httpd_query_key_value(body, "ssid",     ssid_raw, sizeof(ssid_raw));
-    (void)httpd_query_key_value(body, "password", pass_raw, sizeof(pass_raw));
+    (void)form_field("slot", s_form.slot_str, sizeof(s_form.slot_str), false);
+    (void)form_field("ssid", s_form.ssid, sizeof(s_form.ssid), false);
+    (void)form_field("password", s_form.pass, sizeof(s_form.pass), false);
+    (void)form_field("mqtt_clear", s_form.mqtt_clear, sizeof(s_form.mqtt_clear), false);
+    if ((form_field("mqtt_uri", s_form.mqtt_uri, sizeof(s_form.mqtt_uri), true) != ESP_OK) ||
+        (form_field("mqtt_user", s_form.mqtt_user, sizeof(s_form.mqtt_user), true) != ESP_OK) ||
+        (form_field("mqtt_pass", s_form.mqtt_pass, sizeof(s_form.mqtt_pass), true) != ESP_OK)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Broker field too long");
+        goto cleanup;
+    }
 
-    url_decode(ssid, sizeof(ssid), ssid_raw);
-    url_decode(pass, sizeof(pass), pass_raw);
-
-    if (ssid[0] == '\0') {
+    if (s_form.ssid[0] == '\0') {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "SSID cannot be empty");
-        return ESP_FAIL;
+        goto cleanup;
     }
 
-    uint8_t slot = (uint8_t)atoi(slot_str);
+    uint8_t slot = (uint8_t)atoi(s_form.slot_str);
     if ((slot < 1U) || (slot > 2U)) {
         slot = 1U;
+    }
+
+    ret = mqtt_apply(&why);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "broker config not saved: %s", (why != NULL) ? why : esp_err_to_name(ret));
+        httpd_resp_send_err(req, (ret == ESP_ERR_INVALID_ARG) ? HTTPD_400_BAD_REQUEST
+                                                               : HTTPD_500_INTERNAL_SERVER_ERROR,
+                            (why != NULL) ? why : "Broker config not saved");
+        goto cleanup;
     }
 
     const char *ssid_key = (slot == 1U) ? NVS_KEY_WIFI_SSID_1 : NVS_KEY_WIFI_SSID_2;
     const char *pass_key = (slot == 1U) ? NVS_KEY_WIFI_PASS_1 : NVS_KEY_WIFI_PASS_2;
 
-    esp_err_t ret = nvs_config_set_str(ssid_key, ssid);
+    ret = nvs_config_set_str(ssid_key, s_form.ssid);
     if (ret == ESP_OK) {
-        ret = nvs_config_set_str(pass_key, pass);
+        ret = nvs_config_set_str(pass_key, s_form.pass);
     }
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "NVS write failed: %s", esp_err_to_name(ret));
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "NVS write failed");
-        return ESP_FAIL;
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "NVS write failed (Wi-Fi)");
+        goto cleanup;
     }
 
-    ESP_LOGI(TAG, "Saved — slot %u, SSID: '%s'", (unsigned)slot, ssid);
+    ESP_LOGI(TAG, "Saved slot %u, SSID: '%s'", (unsigned)slot, s_form.ssid);
 
     httpd_resp_set_type(req, "text/html");
     (void)httpd_resp_send(req, s_html_done, -1);
 
     xEventGroupSetBits(s_event, PROV_DONE_BIT);
-    return ESP_OK;
+    ret = ESP_OK;
+
+cleanup:
+    broker_cfg_wipe_bytes(&s_form, sizeof(s_form));
+    return ret;
 }
 
 /* --------------------------------------------------------------------------
