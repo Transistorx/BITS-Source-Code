@@ -212,6 +212,24 @@ void mqtt_link_uri_redact(char *out, size_t cap, const char *uri)
     }
 }
 
+typedef struct {
+    uint32_t sample_ms;
+    uint32_t uptime_ms;
+    uint32_t seq;
+    int32_t weight_g;
+    uint32_t cas_seq;
+    uint8_t src_uart;
+    bool stable;
+    bool with_message_id;
+    char boot_id[MQTT_LINK_BOOT_ID_LEN + 1U];
+    char scale_id[MQTT_LINK_SCALE_ID_MAX + 1U];
+    char source[MQTT_LINK_SOURCE_MAX + 1U];
+} weight_rec_t;
+
+_Static_assert(sizeof(weight_rec_t) <= MQTT_LINK_PAYLOAD_MAX, "weight record must fit an item payload");
+
+typedef enum { WAGE_FRESH = 0, WAGE_STALE, WAGE_FUTURE } wage_t;
+
 static void queue_delete(QueueHandle_t *h)
 {
     QueueHandle_t q = *h;
@@ -221,24 +239,56 @@ static void queue_delete(QueueHandle_t *h)
 
 static bool queues_ready(const mqtt_link_queues_t *q)
 {
-    return q != NULL && q->rx != NULL && q->pub != NULL && q->doorbell != NULL &&
+    return q->rx != NULL && q->pub != NULL && q->doorbell != NULL &&
            q->weight[MQTT_LINK_WEIGHT_SLOT_CTL] != NULL && q->weight[MQTT_LINK_WEIGHT_SLOT_TEL] != NULL;
 }
 
-void mqtt_link_queues_deinit(mqtt_link_queues_t *q)
+static bool q_enter(mqtt_link_queues_t *q)
 {
-    if (q == NULL) return;
+    if (q == NULL) return false;
+    atomic_fetch_add(&q->users, 1U);
+    if (atomic_load(&q->open) && queues_ready(q)) return true;
+    atomic_fetch_sub(&q->users, 1U);
+    return false;
+}
+
+static void q_leave(mqtt_link_queues_t *q)
+{
+    atomic_fetch_sub(&q->users, 1U);
+}
+
+static bool q_quiesce(mqtt_link_queues_t *q, uint32_t timeout_ms)
+{
+    TickType_t budget = pdMS_TO_TICKS(timeout_ms);
+    TickType_t start = xTaskGetTickCount();
+    while (atomic_load(&q->users) != 0U) {
+        if ((TickType_t)(xTaskGetTickCount() - start) >= budget) return false;
+        vTaskDelay(1);
+    }
+    return true;
+}
+
+bool mqtt_link_queues_deinit(mqtt_link_queues_t *q)
+{
+    if (q == NULL) return true;
+    atomic_store(&q->open, false);
     SemaphoreHandle_t bell = q->doorbell;
+    if (bell != NULL) (void)xSemaphoreGive(bell);
+    if (!q_quiesce(q, MQTT_LINK_QUIESCE_MS)) return false;
     queue_delete(&q->rx);
     queue_delete(&q->pub);
     for (unsigned i = 0U; i < MQTT_LINK_WEIGHT_SLOTS; i++) queue_delete(&q->weight[i]);
     q->doorbell = NULL;
     if (bell != NULL) vSemaphoreDelete(bell);
+    return true;
 }
 
 bool mqtt_link_queues_init(mqtt_link_queues_t *q, size_t rx_depth, size_t pub_depth)
 {
     if (q == NULL || rx_depth == 0U || pub_depth == 0U) return false;
+    atomic_store(&q->open, false);
+    (void)q_quiesce(q, MQTT_LINK_QUIESCE_MS);
+    atomic_store(&q->users, 0U);
     q->rx = NULL;
     q->pub = NULL;
     q->doorbell = NULL;
@@ -247,6 +297,7 @@ bool mqtt_link_queues_init(mqtt_link_queues_t *q, size_t rx_depth, size_t pub_de
     atomic_store(&q->pub_dropped_full, 0U);
     atomic_store(&q->weight_overwritten, 0U);
     atomic_store(&q->weight_dropped_stale, 0U);
+    atomic_store(&q->weight_dropped_future, 0U);
     atomic_store(&q->dropped_other, 0U);
 
     q->rx = xQueueCreate((UBaseType_t)rx_depth, sizeof(mqtt_item_t));
@@ -257,12 +308,13 @@ bool mqtt_link_queues_init(mqtt_link_queues_t *q, size_t rx_depth, size_t pub_de
         q->weight[i] = xQueueCreate(1U, sizeof(mqtt_item_t));
         if (q->weight[i] == NULL) goto cleanup;
     }
-    q->doorbell = xSemaphoreCreateBinary();
+    q->doorbell = xSemaphoreCreateBinaryStatic(&q->doorbell_buf);
     if (q->doorbell == NULL) goto cleanup;
+    atomic_store(&q->open, true);
     return true;
 
 cleanup:
-    mqtt_link_queues_deinit(q);
+    (void)mqtt_link_queues_deinit(q);
     return false;
 }
 
@@ -283,15 +335,10 @@ static mqtt_enq_result_t push_item(mqtt_link_queues_t *q, QueueHandle_t h, _Atom
     return MQTT_ENQ_OK;
 }
 
-mqtt_enq_result_t mqtt_link_queue_push_rx(mqtt_link_queues_t *q,
-                                          const char *topic, size_t topic_len,
-                                          const char *data, size_t data_len,
-                                          size_t total_len, bool retain,
-                                          uint32_t now_ms)
+static mqtt_enq_result_t push_rx_open(mqtt_link_queues_t *q, const char *topic, size_t topic_len,
+                                      const char *data, size_t data_len, size_t total_len, bool retain,
+                                      uint32_t now_ms)
 {
-    if (!queues_ready(q) || topic == NULL || data == NULL || topic_len == 0U) {
-        return MQTT_ENQ_INVALID;
-    }
     if (retain) {
         atomic_fetch_add(&q->dropped_other, 1U);
         return MQTT_ENQ_RETAINED;
@@ -317,6 +364,18 @@ mqtt_enq_result_t mqtt_link_queue_push_rx(mqtt_link_queues_t *q,
     return push_item(q, q->rx, &q->rx_dropped_full, &item);
 }
 
+mqtt_enq_result_t mqtt_link_queue_push_rx(mqtt_link_queues_t *q,
+                                          const char *topic, size_t topic_len,
+                                          const char *data, size_t data_len,
+                                          size_t total_len, bool retain,
+                                          uint32_t now_ms)
+{
+    if (topic == NULL || data == NULL || topic_len == 0U || !q_enter(q)) return MQTT_ENQ_INVALID;
+    mqtt_enq_result_t r = push_rx_open(q, topic, topic_len, data, data_len, total_len, retain, now_ms);
+    q_leave(q);
+    return r;
+}
+
 static mqtt_enq_result_t build_pub(mqtt_link_queues_t *q, mqtt_item_t *item, const char *topic,
                                    const char *data, int qos, bool retain, uint32_t stamp_ms)
 {
@@ -340,36 +399,138 @@ mqtt_enq_result_t mqtt_link_queue_push_pub(mqtt_link_queues_t *q,
                                            const char *topic, const char *data,
                                            int qos, bool retain)
 {
-    if (!queues_ready(q) || topic == NULL || data == NULL || qos < 0 || qos > 2) {
-        return MQTT_ENQ_INVALID;
-    }
+    if (topic == NULL || data == NULL || qos < 0 || qos > 2 || !q_enter(q)) return MQTT_ENQ_INVALID;
     mqtt_item_t item;
     mqtt_enq_result_t r = build_pub(q, &item, topic, data, qos, retain, 0U);
-    if (r != MQTT_ENQ_OK) return r;
-    return push_item(q, q->pub, &q->pub_dropped_full, &item);
+    if (r == MQTT_ENQ_OK) r = push_item(q, q->pub, &q->pub_dropped_full, &item);
+    q_leave(q);
+    return r;
+}
+
+static mqtt_enq_result_t put_weight_item(mqtt_link_queues_t *q, unsigned slot, const mqtt_item_t *item)
+{
+    QueueHandle_t h = q->weight[slot];
+    if (uxQueueMessagesWaiting(h) != 0U) atomic_fetch_add(&q->weight_overwritten, 1U);
+    (void)xQueueOverwrite(h, item);
+    ring(q);
+    return MQTT_ENQ_OK;
 }
 
 mqtt_enq_result_t mqtt_link_queue_put_weight(mqtt_link_queues_t *q, unsigned slot,
                                              const char *topic, const char *data,
                                              uint32_t now_ms)
 {
-    if (!queues_ready(q) || slot >= MQTT_LINK_WEIGHT_SLOTS || topic == NULL || data == NULL) {
+    if (slot >= MQTT_LINK_WEIGHT_SLOTS || topic == NULL || data == NULL || !q_enter(q)) {
         return MQTT_ENQ_INVALID;
     }
     mqtt_item_t item;
     mqtt_enq_result_t r = build_pub(q, &item, topic, data, 0, false, now_ms);
-    if (r != MQTT_ENQ_OK) return r;
-    QueueHandle_t h = q->weight[slot];
-    if (uxQueueMessagesWaiting(h) != 0U) atomic_fetch_add(&q->weight_overwritten, 1U);
-    (void)xQueueOverwrite(h, &item);
-    ring(q);
+    if (r == MQTT_ENQ_OK) r = put_weight_item(q, slot, &item);
+    q_leave(q);
+    return r;
+}
+
+static mqtt_enq_result_t build_weight_rec(mqtt_link_queues_t *q, mqtt_item_t *item, const char *topic,
+                                          const char *boot_id, uint32_t seq,
+                                          const mqtt_link_weight_t *w, bool with_message_id,
+                                          uint32_t now_ms)
+{
+    mqtt_link_weight_t probe = *w;
+    probe.age_ms = MQTT_LINK_WEIGHT_MAX_AGE_MS;
+    size_t tl = strlen(topic);
+    if (strnlen(w->source, MQTT_LINK_SOURCE_MAX + 1U) > MQTT_LINK_SOURCE_MAX ||
+        mqtt_link_weight_json(item->data, sizeof(item->data), boot_id, seq, &probe, with_message_id) == 0U) {
+        atomic_fetch_add(&q->dropped_other, 1U);
+        return MQTT_ENQ_INVALID;
+    }
+    if (tl == 0U || tl >= MQTT_LINK_TOPIC_MAX) {
+        atomic_fetch_add(&q->dropped_other, 1U);
+        return MQTT_ENQ_TOO_BIG;
+    }
+    weight_rec_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.sample_ms = now_ms - w->age_ms;
+    rec.uptime_ms = w->uptime_ms;
+    rec.seq = seq;
+    rec.weight_g = w->weight_g;
+    rec.cas_seq = w->cas_seq;
+    rec.src_uart = w->src_uart;
+    rec.stable = w->stable;
+    rec.with_message_id = with_message_id;
+    (void)strlcpy(rec.boot_id, boot_id, sizeof(rec.boot_id));
+    (void)strlcpy(rec.scale_id, w->scale_id, sizeof(rec.scale_id));
+    (void)strlcpy(rec.source, w->source, sizeof(rec.source));
+    item->kind = MQTT_ITEM_WEIGHT;
+    item->qos = 0U;
+    item->retain = false;
+    item->len = (uint16_t)sizeof(rec);
+    item->recv_ms = now_ms;
+    memcpy(item->topic, topic, tl + 1U);
+    memcpy(item->data, &rec, sizeof(rec));
     return MQTT_ENQ_OK;
 }
 
-static bool weight_fresh(uint32_t stamp_ms, uint32_t now_ms, uint32_t stale_ms)
+mqtt_enq_result_t mqtt_link_queue_put_weight_sample(mqtt_link_queues_t *q, unsigned slot,
+                                                    const char *topic, const char *boot_id,
+                                                    uint32_t seq, const mqtt_link_weight_t *w,
+                                                    bool with_message_id, uint32_t now_ms)
 {
-    int32_t age = (int32_t)(now_ms - stamp_ms);
-    return age <= 0 || (uint32_t)age <= stale_ms;
+    if (slot >= MQTT_LINK_WEIGHT_SLOTS || topic == NULL || boot_id == NULL || w == NULL ||
+        w->source == NULL || w->scale_id == NULL || !q_enter(q)) {
+        return MQTT_ENQ_INVALID;
+    }
+    mqtt_item_t item;
+    mqtt_enq_result_t r = build_weight_rec(q, &item, topic, boot_id, seq, w, with_message_id, now_ms);
+    if (r == MQTT_ENQ_OK) r = put_weight_item(q, slot, &item);
+    q_leave(q);
+    return r;
+}
+
+static wage_t weight_age(uint32_t stamp_ms, uint32_t now_ms, uint32_t limit_ms)
+{
+    if ((uint32_t)(now_ms - stamp_ms) <= limit_ms) return WAGE_FRESH;
+    if ((uint32_t)(stamp_ms - now_ms) <= MQTT_LINK_WEIGHT_FUTURE_TOL_MS) return WAGE_FRESH;
+    return ((int32_t)(now_ms - stamp_ms) < 0) ? WAGE_FUTURE : WAGE_STALE;
+}
+
+static void count_age_drop(mqtt_link_queues_t *q, wage_t a)
+{
+    atomic_fetch_add(a == WAGE_FUTURE ? &q->weight_dropped_future : &q->weight_dropped_stale, 1U);
+}
+
+static bool render_weight(mqtt_link_queues_t *q, mqtt_item_t *out, uint32_t now_ms)
+{
+    weight_rec_t rec;
+    memcpy(&rec, out->data, sizeof(rec));
+    rec.boot_id[MQTT_LINK_BOOT_ID_LEN] = '\0';
+    rec.scale_id[MQTT_LINK_SCALE_ID_MAX] = '\0';
+    rec.source[MQTT_LINK_SOURCE_MAX] = '\0';
+    wage_t a = weight_age(rec.sample_ms, now_ms, MQTT_LINK_WEIGHT_MAX_AGE_MS);
+    if (a != WAGE_FRESH) {
+        count_age_drop(q, a);
+        return false;
+    }
+    uint32_t age = now_ms - rec.sample_ms;
+    if (age > MQTT_LINK_WEIGHT_MAX_AGE_MS) age = 0U;
+    mqtt_link_weight_t w = {
+        .uptime_ms = rec.uptime_ms,
+        .scale_id = rec.scale_id,
+        .src_uart = rec.src_uart,
+        .weight_g = rec.weight_g,
+        .stable = rec.stable,
+        .age_ms = age,
+        .cas_seq = rec.cas_seq,
+        .source = rec.source,
+    };
+    size_t n = mqtt_link_weight_json(out->data, sizeof(out->data), rec.boot_id, rec.seq, &w,
+                                     rec.with_message_id);
+    if (n == 0U) {
+        atomic_fetch_add(&q->dropped_other, 1U);
+        return false;
+    }
+    out->kind = MQTT_ITEM_PUB;
+    out->len = (uint16_t)n;
+    return true;
 }
 
 static bool take_ready(mqtt_link_queues_t *q, mqtt_item_t *out, uint32_t now_ms, uint32_t stale_ms)
@@ -378,8 +539,12 @@ static bool take_ready(mqtt_link_queues_t *q, mqtt_item_t *out, uint32_t now_ms,
     if (xQueueReceive(q->pub, out, 0) == pdTRUE) return true;
     for (unsigned i = 0U; i < MQTT_LINK_WEIGHT_SLOTS; i++) {
         if (xQueueReceive(q->weight[i], out, 0) != pdTRUE) continue;
-        if (weight_fresh(out->recv_ms, now_ms, stale_ms)) return true;
-        atomic_fetch_add(&q->weight_dropped_stale, 1U);
+        wage_t a = weight_age(out->recv_ms, now_ms, stale_ms);
+        if (a != WAGE_FRESH) {
+            count_age_drop(q, a);
+            continue;
+        }
+        if (out->kind != MQTT_ITEM_WEIGHT || render_weight(q, out, now_ms)) return true;
     }
     return false;
 }
@@ -387,26 +552,33 @@ static bool take_ready(mqtt_link_queues_t *q, mqtt_item_t *out, uint32_t now_ms,
 bool mqtt_link_queue_next(mqtt_link_queues_t *q, mqtt_item_t *out, uint32_t timeout_ms,
                           uint32_t now_ms, uint32_t stale_ms)
 {
-    if (!queues_ready(q) || out == NULL) return false;
+    if (out == NULL || !q_enter(q)) return false;
     TickType_t budget = pdMS_TO_TICKS(timeout_ms);
     TickType_t start = xTaskGetTickCount();
     uint32_t now = now_ms;
-    for (;;) {
-        if (take_ready(q, out, now, stale_ms)) return true;
+    bool got = false;
+    while (atomic_load(&q->open)) {
+        if (take_ready(q, out, now, stale_ms)) {
+            got = true;
+            break;
+        }
         TickType_t used = xTaskGetTickCount() - start;
-        if (used >= budget) return false;
+        if (used >= budget) break;
         (void)xSemaphoreTake(q->doorbell, budget - used);
         now = now_ms + (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - start);
     }
+    q_leave(q);
+    return got;
 }
 
-size_t mqtt_link_queue_pending(const mqtt_link_queues_t *q)
+size_t mqtt_link_queue_pending(mqtt_link_queues_t *q)
 {
-    if (!queues_ready(q)) return 0U;
+    if (!q_enter(q)) return 0U;
     size_t n = (size_t)uxQueueMessagesWaiting(q->rx) + (size_t)uxQueueMessagesWaiting(q->pub);
     for (unsigned i = 0U; i < MQTT_LINK_WEIGHT_SLOTS; i++) {
         n += (size_t)uxQueueMessagesWaiting(q->weight[i]);
     }
+    q_leave(q);
     return n;
 }
 
@@ -423,12 +595,13 @@ static bool take_any(mqtt_link_queues_t *q, mqtt_item_t *out)
 size_t mqtt_link_queue_flush(mqtt_link_queues_t *q, mqtt_item_t *scratch, size_t max_items,
                              mqtt_link_flush_cb cb, void *ctx)
 {
-    if (!queues_ready(q) || scratch == NULL || cb == NULL) return 0U;
+    if (scratch == NULL || cb == NULL || !q_enter(q)) return 0U;
     size_t n = 0U;
     while (n < max_items && take_any(q, scratch)) {
         cb(scratch, ctx);
         n++;
     }
+    q_leave(q);
     return n;
 }
 
@@ -465,4 +638,30 @@ bool mqtt_link_lc_running(const mqtt_link_lc_t *lc)
 mqtt_lc_state_t mqtt_link_lc_state(const mqtt_link_lc_t *lc)
 {
     return (mqtt_lc_state_t)atomic_load((atomic_int *)&lc->state);
+}
+
+void mqtt_link_handoff_init(mqtt_link_handoff_t *h)
+{
+    if (h != NULL) atomic_store(&h->state, MQTT_HANDOFF_RUN);
+}
+
+bool mqtt_link_handoff_task_exit(mqtt_link_handoff_t *h)
+{
+    if (h == NULL) return false;
+    int expected = MQTT_HANDOFF_RUN;
+    return atomic_compare_exchange_strong(&h->state, &expected, MQTT_HANDOFF_DONE);
+}
+
+bool mqtt_link_handoff_wait(mqtt_link_handoff_t *h, uint32_t timeout_ms)
+{
+    if (h == NULL) return false;
+    TickType_t budget = pdMS_TO_TICKS(timeout_ms);
+    TickType_t start = xTaskGetTickCount();
+    while (atomic_load(&h->state) == MQTT_HANDOFF_RUN &&
+           (TickType_t)(xTaskGetTickCount() - start) < budget) {
+        vTaskDelay(1);
+    }
+    int expected = MQTT_HANDOFF_RUN;
+    if (atomic_compare_exchange_strong(&h->state, &expected, MQTT_HANDOFF_ORPHAN)) return false;
+    return expected == MQTT_HANDOFF_DONE;
 }

@@ -28,6 +28,7 @@
 #include "test_mqtt_stop.h"
 #include "test_mqtt_env.h"
 #include "test_transport_golden.h"
+#include "test_weight_mqtt_fix.h"
 #include "weight_source.h"
 #include "websocket_server.h"
 
@@ -458,6 +459,7 @@ void app_main(void)
     test_mqtt_cmd_run();
     test_mqtt_stop_run();
     test_mqtt_env_run();
+    test_weight_mqtt_fix_run();
 
     /* ---- Serial-log policy helpers (change detector, rate limiter, health line) ---- */
     test_log_util_run();

@@ -36,6 +36,11 @@ extern "C" {
 #define MQTT_LINK_WEIGHT_SLOTS   2U
 #define MQTT_LINK_ENV_MAX        256U  /* birth and weight/ctl size limit */
 
+#define MQTT_LINK_WEIGHT_FUTURE_TOL_MS 100U
+#define MQTT_LINK_WEIGHT_MAX_AGE_MS 3000U
+#define MQTT_LINK_QUIESCE_MS 200U
+#define MQTT_LINK_SOURCE_MAX 31U
+
 #define MQTT_LINK_BACKOFF_MIN_MS 1000U
 #define MQTT_LINK_BACKOFF_MAX_MS 30000U
 
@@ -157,7 +162,8 @@ void mqtt_link_uri_redact(char *out, size_t cap, const char *uri);
 
 typedef enum {
     MQTT_ITEM_PUB = 0,  /* outbound: published by the mqtt_pub task */
-    MQTT_ITEM_RX        /* inbound: delivered to the command handler */
+    MQTT_ITEM_RX,       /* inbound: delivered to the command handler */
+    MQTT_ITEM_WEIGHT
 } mqtt_item_kind_t;
 
 typedef struct {
@@ -184,10 +190,14 @@ typedef struct {
     QueueHandle_t pub;
     QueueHandle_t weight[MQTT_LINK_WEIGHT_SLOTS];
     SemaphoreHandle_t doorbell;
+    StaticSemaphore_t doorbell_buf;
+    atomic_bool open;
+    atomic_uint users;
     _Atomic uint32_t rx_dropped_full;
     _Atomic uint32_t pub_dropped_full;
     _Atomic uint32_t weight_overwritten;
     _Atomic uint32_t weight_dropped_stale;
+    _Atomic uint32_t weight_dropped_future;
     _Atomic uint32_t dropped_other;
 } mqtt_link_queues_t;
 
@@ -207,16 +217,21 @@ mqtt_enq_result_t mqtt_link_queue_put_weight(mqtt_link_queues_t *q, unsigned slo
                                              const char *topic, const char *data,
                                              uint32_t now_ms);
 
+mqtt_enq_result_t mqtt_link_queue_put_weight_sample(mqtt_link_queues_t *q, unsigned slot,
+                                                    const char *topic, const char *boot_id,
+                                                    uint32_t seq, const mqtt_link_weight_t *w,
+                                                    bool with_message_id, uint32_t now_ms);
+
 bool mqtt_link_queue_next(mqtt_link_queues_t *q, mqtt_item_t *out, uint32_t timeout_ms,
                           uint32_t now_ms, uint32_t stale_ms);
 
-size_t mqtt_link_queue_pending(const mqtt_link_queues_t *q);
+size_t mqtt_link_queue_pending(mqtt_link_queues_t *q);
 
 typedef void (*mqtt_link_flush_cb)(const mqtt_item_t *item, void *ctx);
 size_t mqtt_link_queue_flush(mqtt_link_queues_t *q, mqtt_item_t *scratch, size_t max_items,
                              mqtt_link_flush_cb cb, void *ctx);
 
-void mqtt_link_queues_deinit(mqtt_link_queues_t *q);
+bool mqtt_link_queues_deinit(mqtt_link_queues_t *q);
 
 /* Link lifecycle: IDLE -> RUNNING -> STOPPING -> IDLE. begin_stop succeeds once
  * per run, so stop is idempotent; start is refused until stop has finished. */
@@ -229,6 +244,13 @@ bool mqtt_link_lc_begin_stop(mqtt_link_lc_t *lc);  /* RUNNING -> STOPPING, once 
 void mqtt_link_lc_end_stop(mqtt_link_lc_t *lc);    /* STOPPING -> IDLE */
 bool mqtt_link_lc_running(const mqtt_link_lc_t *lc);
 mqtt_lc_state_t mqtt_link_lc_state(const mqtt_link_lc_t *lc);
+
+typedef enum { MQTT_HANDOFF_RUN = 0, MQTT_HANDOFF_DONE, MQTT_HANDOFF_ORPHAN } mqtt_handoff_state_t;
+typedef struct { atomic_int state; } mqtt_link_handoff_t;
+
+void mqtt_link_handoff_init(mqtt_link_handoff_t *h);
+bool mqtt_link_handoff_task_exit(mqtt_link_handoff_t *h);
+bool mqtt_link_handoff_wait(mqtt_link_handoff_t *h, uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }

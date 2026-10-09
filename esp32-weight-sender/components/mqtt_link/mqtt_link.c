@@ -53,7 +53,8 @@ static atomic_bool s_evt_disconnected;
 static mqtt_link_lc_t s_lc;
 static bool s_lc_ready;
 static bool s_shutdown_hooked;
-static atomic_bool s_pub_done;
+static mqtt_link_handoff_t s_pub_handoff;
+static atomic_bool s_teardown_pending;
 static atomic_int s_published_id;
 static atomic_uint s_published_count;  /* publishes handed to esp-mqtt, for the health line */
 static atomic_uint s_publish_failed;
@@ -140,16 +141,17 @@ bool mqtt_link_publish(const char *topic_suffix, const char *json, int qos, bool
     return mqtt_link_queue_push_pub(&s_queues, topic, json, qos, retain) == MQTT_ENQ_OK;
 }
 
-static bool weight_put(unsigned slot, const char *topic_suffix, const char *json, uint32_t now_ms)
+static bool weight_put(unsigned slot, const char *topic_suffix, uint32_t seq,
+                       const mqtt_link_weight_t *w, bool with_message_id, uint32_t now_ms)
 {
     char topic[MQTT_LINK_TOPIC_MAX];
     if (!publish_gate(topic, sizeof(topic), topic_suffix, 0)) return false;
-    return mqtt_link_queue_put_weight(&s_queues, slot, topic, json, now_ms) == MQTT_ENQ_OK;
+    return mqtt_link_queue_put_weight_sample(&s_queues, slot, topic, mqtt_link_boot_id(), seq, w,
+                                             with_message_id, now_ms) == MQTT_ENQ_OK;
 }
 
 void mqtt_link_weight_frame(const mqtt_link_weight_t *w, uint32_t now_ms)
 {
-    char json[320];
     if (w == NULL) return;
     mqtt_link_weight_t f = *w;
     f.scale_id = s_scale_id;
@@ -157,16 +159,11 @@ void mqtt_link_weight_frame(const mqtt_link_weight_t *w, uint32_t now_ms)
     mqtt_link_wpub_t step = mqtt_link_wgate_step(&s_wgate, w->src_uart, w->cas_seq, now_ms,
                                                  MQTT_LINK_WEIGHT_HB_PERIOD_MS);
     if (step == MQTT_LINK_WPUB_NONE) return;
-    if (step == MQTT_LINK_WPUB_FRAME) {
-        size_t n = mqtt_link_weight_json(json, sizeof(json), mqtt_link_boot_id(), s_wgate.seq_ctl,
-                                         w, false);
-        if (n != 0U && weight_put(MQTT_LINK_WEIGHT_SLOT_CTL, MQTT_SUFFIX_WEIGHT_CTL, json, now_ms)) {
-            s_wgate.seq_ctl++;
-        }
+    if (step == MQTT_LINK_WPUB_FRAME &&
+        weight_put(MQTT_LINK_WEIGHT_SLOT_CTL, MQTT_SUFFIX_WEIGHT_CTL, s_wgate.seq_ctl, w, false, now_ms)) {
+        s_wgate.seq_ctl++;
     }
-    size_t tn = mqtt_link_weight_json(json, sizeof(json), mqtt_link_boot_id(), s_wgate.seq_tel, w,
-                                      true);
-    if (tn != 0U && weight_put(MQTT_LINK_WEIGHT_SLOT_TEL, MQTT_SUFFIX_WEIGHT_TEL, json, now_ms)) {
+    if (weight_put(MQTT_LINK_WEIGHT_SLOT_TEL, MQTT_SUFFIX_WEIGHT_TEL, s_wgate.seq_tel, w, true, now_ms)) {
         s_wgate.seq_tel++;
     }
 }
@@ -272,6 +269,26 @@ static const char *mqtt_error_text(void)
     return text;
 }
 
+static bool link_teardown(void)
+{
+    if (s_client != NULL) {
+        (void)esp_mqtt_client_stop(s_client);
+        (void)esp_mqtt_client_destroy(s_client);
+        s_client = NULL;
+    }
+    atomic_store(&s_connected, false);
+    if (!mqtt_link_queues_deinit(&s_queues)) {
+        atomic_store(&s_teardown_pending, true);
+        ESP_LOGE(TAG, "queues still in use after %ums; kept allocated, link held stopped reason=MQTT_STOP_QUEUES_BUSY",
+                 (unsigned)MQTT_LINK_QUIESCE_MS);
+        return false;
+    }
+    atomic_store(&s_teardown_pending, false);
+    mqtt_link_lc_end_stop(&s_lc);
+    ESP_LOGI(TAG, "stopped");
+    return true;
+}
+
 static void mqtt_pub_task(void *arg)
 {
     (void)arg;
@@ -331,7 +348,10 @@ static void mqtt_pub_task(void *arg)
             if (s_command_cb != NULL) s_command_cb(item.data, item.len, item.retain, item.recv_ms);
         }
     }
-    atomic_store(&s_pub_done, true);
+    if (!mqtt_link_handoff_task_exit(&s_pub_handoff)) {
+        ESP_LOGW(TAG, "pub task exited after stop gave up; finishing teardown reason=MQTT_STOP_LATE_EXIT");
+        (void)link_teardown();
+    }
     vTaskDelete(NULL);
 }
 
@@ -353,10 +373,11 @@ esp_err_t mqtt_link_stop(void)
     if (!s_lc_ready || !mqtt_link_lc_begin_stop(&s_lc)) return ESP_OK;
 
     /* Pub task sees STOPPING and exits; it is the only other publisher. */
-    for (uint32_t w = 0U; !atomic_load(&s_pub_done) && w < MQTT_STOP_TASK_WAIT_MS; w += 10U) {
-        vTaskDelay(pdMS_TO_TICKS(10));
+    if (!mqtt_link_handoff_wait(&s_pub_handoff, MQTT_STOP_TASK_WAIT_MS)) {
+        ESP_LOGE(TAG, "pub task did not exit in %ums; teardown deferred to it reason=MQTT_STOP_PUB_STUCK",
+                 (unsigned)MQTT_STOP_TASK_WAIT_MS);
+        return ESP_ERR_TIMEOUT;
     }
-    if (!atomic_load(&s_pub_done)) ESP_LOGW(TAG, "pub task did not exit in time");
     vTaskDelay(pdMS_TO_TICKS(20)); /* let the idle task reap the deleted task */
 
     if (s_client != NULL && atomic_load(&s_connected)) {
@@ -377,16 +398,14 @@ esp_err_t mqtt_link_stop(void)
         }
     }
 
-    if (s_client != NULL) {
-        (void)esp_mqtt_client_stop(s_client);
-        (void)esp_mqtt_client_destroy(s_client); /* frees the outbox and buffers */
-        s_client = NULL;
+    return link_teardown() ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+static void queues_release(void)
+{
+    if (!mqtt_link_queues_deinit(&s_queues)) {
+        ESP_LOGE(TAG, "queues still in use; kept allocated reason=MQTT_STOP_QUEUES_BUSY");
     }
-    mqtt_link_queues_deinit(&s_queues);
-    atomic_store(&s_connected, false);
-    mqtt_link_lc_end_stop(&s_lc);
-    ESP_LOGI(TAG, "stopped");
-    return ESP_OK;
 }
 
 static void shutdown_handler(void)
@@ -399,6 +418,12 @@ esp_err_t mqtt_link_start(void)
     if (!s_lc_ready) {
         mqtt_link_lc_init(&s_lc);
         s_lc_ready = true;
+    }
+    if (mqtt_link_lc_state(&s_lc) == MQTT_LC_STOPPING && atomic_load(&s_teardown_pending) &&
+        mqtt_link_queues_deinit(&s_queues)) {
+        atomic_store(&s_teardown_pending, false);
+        mqtt_link_lc_end_stop(&s_lc);
+        ESP_LOGI(TAG, "deferred teardown completed");
     }
     if (mqtt_link_lc_state(&s_lc) != MQTT_LC_IDLE) return ESP_ERR_INVALID_STATE;
     if (CONFIG_MQTT_LINK_BROKER_URI[0] == '\0') {
@@ -463,18 +488,18 @@ esp_err_t mqtt_link_start(void)
     atomic_store(&s_connected, false);
     atomic_store(&s_evt_connected, false);
     atomic_store(&s_evt_disconnected, false);
-    atomic_store(&s_pub_done, false);
+    mqtt_link_handoff_init(&s_pub_handoff);
 
     s_client = esp_mqtt_client_init(&cfg);
     if (s_client == NULL) {
-        mqtt_link_queues_deinit(&s_queues);
+        queues_release();
         return ESP_FAIL;
     }
     esp_err_t err = esp_mqtt_client_register_event(s_client, MQTT_EVENT_ANY, on_mqtt_event, NULL);
     if (err != ESP_OK) {
         (void)esp_mqtt_client_destroy(s_client);
         s_client = NULL;
-        mqtt_link_queues_deinit(&s_queues);
+        queues_release();
         return err;
     }
 
@@ -482,10 +507,7 @@ esp_err_t mqtt_link_start(void)
     if (xTaskCreate(mqtt_pub_task, "mqtt_pub", MQTT_PUB_STACK, NULL, MQTT_TASK_PRIO, NULL) !=
         pdPASS) {
         (void)mqtt_link_lc_begin_stop(&s_lc);
-        (void)esp_mqtt_client_destroy(s_client);
-        s_client = NULL;
-        mqtt_link_queues_deinit(&s_queues);
-        mqtt_link_lc_end_stop(&s_lc);
+        (void)link_teardown();
         return ESP_ERR_NO_MEM;
     }
     err = esp_mqtt_client_start(s_client);
