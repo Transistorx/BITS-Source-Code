@@ -1,0 +1,60 @@
+menu "Weighing-scale board pin map"
+
+    # This menu is owned by the board component so that EVERY project that
+    # links board_pins.c (production firmware and the QEMU test suite) sees
+    # the same symbols. Do not move these back into main/Kconfig.projbuild:
+    # the QEMU project has its own main and never loads the production one.
+
+    choice WEIGHT_DEMO_BOARD_VARIANT
+        prompt "Weighing-scale board variant"
+        default WEIGHT_DEMO_BOARD_RS485_MAX13487E
+        help
+            Selects the ONE authoritative pin map compiled into the firmware.
+            GPIO and UART-peripheral numbers for the scale interface live in
+            components/board/include/board_pins.h and are NOT Kconfig values,
+            so they cannot be scattered or set to an invalid combination.
+
+    config WEIGHT_DEMO_BOARD_RS485_MAX13487E
+        bool "RS-485 MAX13487E AutoDirection (current board)"
+        help
+            RS-485 scale interface on MAX13487E auto-direction transceivers.
+
+              CH1: UART1  TX=GPIO13 (VFD_TX)   RX=GPIO15 (VFD_RX, MTDO strap)
+              CH2: UART2  TX=GPIO32 (VFD_TX_2) RX=GPIO33 (VFD_RX_2)
+
+            The MAX13487E drives bus direction from its own TX activity, so
+            the ESP32 uses an ordinary UART: NO DE/RE GPIO, NO RTS direction
+            control, and UART_MODE_RS485_HALF_DUPLEX must not be enabled.
+            Differential connector A/B/GND numbering is VERIFY ON PCB.
+
+    config WEIGHT_DEMO_BOARD_RS232_LEGACY
+        bool "Legacy RS-232 map (rollback board)"
+        help
+            Previous RS-232 PCB map, kept selectable in the same commit so the
+            RS-232 rollback path stays available.
+
+              CH1: UART1  TX=GPIO33 (232TX1) RX=GPIO35 (232RX1, input-only)
+              CH2: UART2  TX=GPIO32 (232TX2) RX=GPIO34 (232RX2, input-only)
+
+    endchoice
+
+    config WEIGHT_DEMO_SCALE_ACTIVE_CHANNEL
+        int "Active scale channel for the single physical CAS scale"
+        range 1 2
+        default 1
+        help
+            Field deployment is ONE physical CAS CI-150A scale. This selects
+            which RS-485 channel carries it. Weight, freshness, link state,
+            the health counters, ZERO/TARE and the MQTT publisher all follow
+            this channel only; the other channel is still opened and counted
+            for diagnostics but can never make the link look healthy.
+
+            The deployed CI-150A is wired to RS-485 CHANNEL 1 (UART1,
+            TX=GPIO13, RX=GPIO15), so the default is 1. NVS key "scale_ch"
+            (1 or 2; 0 = use this value) overrides it at boot.
+
+            Channel 1 RX is GPIO15 (MTDO), a strapping pad. A receiver that
+            drives the bus low during reset can disturb boot; verify on the
+            PCB. Do not remap pins to work around it.
+
+endmenu

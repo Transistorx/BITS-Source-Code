@@ -1,0 +1,37 @@
+CONFIG_IDF_TARGET="esp32"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+CONFIG_LWIP_TCPIP_CORE_LOCKING=y
+CONFIG_ESP_WIFI_IRAM_OPT=y
+CONFIG_ESP_WIFI_RX_IRAM_OPT=y
+CONFIG_LOG_COLORS=y
+# Custom partition table: 3 MB application partition (see partitions.csv).
+# The default 1 MB app slot is too small for this firmware.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Independent ramp simulator is the authoritative bench mode; judging its
+# rising readings with the process overshoot rules would fail every job.
+CONFIG_WEIGHT_DEMO_COMPLETION_MODE_RAMP_TEST=y
+CONFIG_WEIGHT_DEMO_CONTROL_LOG_MS=1000
+CONFIG_WEIGHT_DEMO_RAMP_TOP_G=20000
+CONFIG_WEIGHT_DEMO_TELEMETRY_SERVER_IP="192.168.137.1"
+CONFIG_WEIGHT_DEMO_TELEMETRY_SERVER_PORT=8000
+
+# Measured on the physical board: the drive stage is ACTIVE-HIGH.
+# See relay_expander.h for why this supersedes the earlier derivation.
+CONFIG_WEIGHT_DEMO_RELAY_POLARITY_ACTIVE_HIGH=y
+
+# Actuation gate: ON commands are permitted. The mapping (PCF8574T at 0x22,
+# Relay 1 = P6/0x40/pin 11, Relay 2 = P7/0x80/pin 12) and the ACTIVE-HIGH
+# polarity are both field-measured, so the gate is satisfied by evidence rather
+# than by assumption. The gate MECHANISM is untouched: setting this to n still
+# suppresses ON with zero bus traffic, and OFF is never gated either way, so
+# every failsafe keeps de-energizing. See relay_expander.h.
+CONFIG_WEIGHT_DEMO_POLARITY_VERIFIED=y
+
+# esp-mqtt sends enqueued messages from its own task, one per loop, then waits
+# up to the poll timeout (default 1 s). Keep it short so non-blocking telemetry
+# and ACKs leave promptly (mqtt_link never calls the blocking publish).
+CONFIG_MQTT_USE_CUSTOM_CONFIG=y
+CONFIG_MQTT_POLL_READ_TIMEOUT_MS=50

@@ -1,0 +1,11 @@
+# Partition table for the 4 MB ESP32 on the weight sender.
+#
+# Same reasoning as the relay controller: the default "single app" layout
+# leaves only 1 MB for the application, and this firmware was down to 10% free.
+# The ramp simulator, its logging and the extended protocol have to fit
+# somewhere, so the application gets 3 MB.
+#
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0x300000,

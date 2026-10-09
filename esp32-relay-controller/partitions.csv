@@ -1,0 +1,12 @@
+# Partition table for the 4 MB ESP32 on the relay controller.
+#
+# The default "single app" layout gives the application only 1 MB, which this
+# firmware had filled to 97% (3% free) once the dispensing architecture, the
+# web API and its embedded control page landed. A nearly-full app partition is
+# a build-time warning today and a boot failure the moment enough is added, so
+# the application gets 3 MB here instead.
+#
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0x300000,

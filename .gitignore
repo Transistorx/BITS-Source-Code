@@ -1,0 +1,16 @@
+﻿build/
+.venv*/
+managed_components/
+__pycache__/
+*.pyc
+sdkconfig
+sdkconfig.old
+*.log
+logs/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets*
+dist/

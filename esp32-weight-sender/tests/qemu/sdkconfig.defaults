@@ -1,0 +1,31 @@
+CONFIG_IDF_TARGET="esp32"
+CONFIG_LOG_COLORS=n
+# Required because this app links websocket_server, which uses the
+# esp_http_server WebSocket API. Without it httpd_ws_frame_t is undefined.
+CONFIG_HTTPD_WS_SUPPORT=y
+
+# The board-pinmap suite runs in app_main alongside the existing CAS/parser
+# tests. The default 3584-byte main-task stack overflows under that combined
+# depth and resets the image mid-suite, so give the test task headroom.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# TEST ONLY. This compiles the pure simulator helpers (weight_sim_*, weight_ramp_*)
+# into the QEMU image so the host suite can unit-test them. These helpers are NOT
+# a runtime weight source: production firmware never defines this symbol, and the
+# production weight_source_get() has no simulator branch at all.
+CONFIG_WEIGHT_DEMO_TEST_SIMULATION=y
+
+# Weighing-scale board variant. This is the RS-485 MAX13487E revision the
+# pin-map tests lock. Changing it here changes which pin-map tests run.
+CONFIG_WEIGHT_DEMO_BOARD_RS485_MAX13487E=y
+# CONFIG_WEIGHT_DEMO_BOARD_RS232_LEGACY is not set
+
+# Single-scale deployment channel. The suite asserts this defaults to CH2
+# (GPIO32/33) because CH1 RX sits on the GPIO15 MTDO strap pad.
+CONFIG_WEIGHT_DEMO_SCALE_ACTIVE_CHANNEL=2
+
+# The QEMU suite replays golden frames through the legacy multi-protocol
+# auto-detect path (explicit per-reader opt-in); production firmware leaves
+# this at the CI-2001-only default. The ci2001-only reader tests do not depend
+# on it.
+CONFIG_SCALE_PROTOCOL_AUTODETECT_LEGACY=y

@@ -1,0 +1,34 @@
+menu "MQTT link (telemetry + operator commands)"
+
+    config MQTT_LINK_BROKER_URI
+        string "Broker URI (empty disables MQTT)"
+        default "mqtt://192.168.137.1:1883"
+        help
+            Mosquitto in WSL, same host the devices already reach. The URI is
+            logged only with any user:password@ part removed. With MQTT off
+            or unreachable the controller keeps using the HTTP routes.
+
+    config MQTT_LINK_DEVICE_ID_OVERRIDE
+        string "Device id override (empty = the telemetry device id)"
+        default ""
+        help
+            Topics are cas/{device}/... where {device} is [A-Za-z0-9._-]{1,64}.
+            Left empty, the same device id the HTTP telemetry uses is taken, so
+            topic and payload device ids always agree.
+
+    config MQTT_LINK_USERNAME
+        string "Broker username (empty = anonymous)"
+        default ""
+
+    config MQTT_LINK_PASSWORD
+        string "Broker password"
+        default ""
+        help
+            Never logged.
+
+    config MQTT_LINK_KEEPALIVE_S
+        int "MQTT keepalive (seconds)"
+        default 30
+        range 5 120
+
+endmenu

@@ -1,0 +1,500 @@
+menu "Weight WebSocket Bench Test (relay controller)"
+
+    # Wi-Fi credentials are no longer set here. They are stored in NVS by the
+    # provisioning portal: hold BOOT (GPIO0) for 3 s, join the "BITS-Relay-XXXX"
+    # access point (XXXX from the unique device id) and submit the form at
+    # http://192.168.4.1. Holding BOOT for 10 s erases the stored credentials
+    # (provisioning reset) before reopening the portal.
+
+    config WEIGHT_DEMO_STATIC_IP
+        string "Static IPv4 address (empty = DHCP)"
+        default "192.168.137.76"
+        help
+            Applied to the STA interface before connecting: the DHCP client is
+            stopped and this address is set with esp_netif_set_ip_info.
+
+    config WEIGHT_DEMO_GATEWAY
+        string "Gateway"
+        default "192.168.137.1"
+
+    config WEIGHT_DEMO_NETMASK
+        string "Netmask"
+        default "255.255.255.0"
+
+    config WEIGHT_DEMO_WEIGHT_SERVER_IP
+        string "Weight sender IP (primary target)"
+        default "192.168.137.217"
+        help
+            Static address of the weight sender; the WebSocket client connects
+            to ws://<ip>:<port><ws path> without depending on mDNS. Leave
+            empty only to fall back to the diagnostic mDNS lookup below.
+
+    config WEIGHT_DEMO_WEIGHT_SERVER_PORT
+        int "Weight server port"
+        default 80
+
+    config WEIGHT_DEMO_WS_PATH
+        string "WebSocket URI path"
+        default "/ws"
+
+    config WEIGHT_DEMO_WEIGHT_SERVER_MDNS_NAME
+        string "Weight server mDNS name (diagnostic fallback)"
+        default "weight-sender"
+        help
+            Resolved as <name>.local. Used only when the weight sender IP
+            above is empty; normal operation does not depend on mDNS.
+
+    config WEIGHT_DEMO_TRIGGER_G
+        int "Relay trigger threshold (grams)"
+        default 10000
+        help
+            All 12 relays energize as one group while the received weight is
+            at or above this value, and drop out below it. The comparison is
+            an integer >= in grams — never a float equality. 10000 g is the
+            WEIGHT_TRIGGER_KG = 10.0 kg requirement.
+
+    config WEIGHT_DEMO_MESSAGE_TIMEOUT_MS
+        int "Valid-message timeout / stale-weight timeout (ms)"
+        default 5000
+        help
+            All relays are forced OFF when no valid weight arrives within
+            this window, and the dispense controller treats a running job's
+            weight feed as stale after the same interval. The sender transmits
+            every 1000 ms.
+
+    # ------------------------------------------------------------------
+    # Dispensing
+    # ------------------------------------------------------------------
+
+    choice WEIGHT_DEMO_CONTROL_MODE
+        prompt "Relay control mode"
+        default WEIGHT_DEMO_CONTROL_MODE_DISPENSE
+        help
+            DISPENSE runs a single-scale, two-nozzle dispense controller with
+            exclusive scale ownership. ONE physical CAS scale serves both
+            nozzles: the operator moves it between them. At most one job
+            dispenses at a time (relay1_on && relay2_on is always false). A
+            second job waits in QUEUED until the owner reaches a terminal
+            state, its relay is OFF, and a final CAS sample is captured. When
+            the next job uses a different nozzle, the operator must confirm
+            READY (scale positioned) before it energises.
+
+            LEVEL_GROUP keeps the previous bench behaviour exactly: all 12
+            relays act as one group at the WEIGHT_DEMO_TRIGGER_G threshold.
+            The failsafes (stale weight, link loss, timeout, boot) are
+            identical in both.
+
+        config WEIGHT_DEMO_CONTROL_MODE_DISPENSE
+            bool "DISPENSE (job queue + state machine, relays 1/2)"
+        config WEIGHT_DEMO_CONTROL_MODE_LEVEL_GROUP
+            bool "LEVEL_GROUP (legacy: all 12 relays at the trigger)"
+    endchoice
+
+    config WEIGHT_DEMO_TARGET_G
+        int "Initial dispense target (grams)"
+        default 5000
+        help
+            Default target offered by the web API and used for the bench
+            acceptance run. 5000 g = 5.000 kg.
+
+    config WEIGHT_DEMO_TOLERANCE_G
+        int "Target tolerance (grams)"
+        default 20
+        help
+            A job completes when the settled weight is within this band of the
+            target. Keep it above one minimum-ON burst of the fine valve
+            (WEIGHT_DEMO_MIN_ON_MS x the simulator's fine rate), otherwise the
+            fine phase can only overshoot.
+
+    config WEIGHT_DEMO_COARSE_TRANSITION_G
+        int "Coarse->fine transition distance (grams)"
+        default 1000
+        help
+            The coarse valve is closed once the remaining distance to target
+            falls to this value; the fine valve takes over from there.
+
+    config WEIGHT_DEMO_SETTLE_MS
+        int "Settling time with both valves closed (ms)"
+        default 1500
+
+    config WEIGHT_DEMO_MAX_DURATION_MS
+        int "Maximum job duration (ms)"
+        default 120000
+        help
+            Whole-job budget, including waiting for the scale. Exceeding it
+            fails the job and raises a TIMEOUT fault.
+
+    config WEIGHT_DEMO_MAX_OVERSHOOT_G
+        int "Maximum allowed overshoot (grams)"
+        default 100
+        help
+            Exceeding the target by more than this is a fault, not a success:
+            the job fails and both valves are latched closed.
+
+    config WEIGHT_DEMO_CORRECTION_LIMIT
+        int "Maximum fine-correction attempts per job"
+        default 5
+
+    config WEIGHT_DEMO_MAX_TARGET_G
+        int "Maximum accepted target (grams)"
+        default 20000
+
+    config WEIGHT_DEMO_JOB_QUEUE_MAX
+        int "Job queue depth"
+        default 8
+        help
+            Total job records retained, including finished ones: a finished
+            record is the slot a later request reuses.
+
+    config WEIGHT_DEMO_COARSE_RELAY_INDEX
+        int "Coarse/high-flow relay index (0 = Relay 1)"
+        default 0
+
+    config WEIGHT_DEMO_FINE_RELAY_INDEX
+        int "Fine/low-flow relay index (1 = Relay 2)"
+        default 1
+
+    # ------------------------------------------------------------------
+    # Time-proportional fine control
+    # ------------------------------------------------------------------
+
+    config WEIGHT_DEMO_WINDOW_MS
+        int "Fine-control PWM window (ms)"
+        default 500
+        help
+            The PID output is a duty cycle, and a solenoid is binary, so the
+            duty is realised as a proportion of this window. Keep the window
+            at or below the sender's 1000 ms transmit period so the weight
+            feedback always covers at least one full window.
+
+    config WEIGHT_DEMO_MIN_ON_MS
+        int "Anti-chatter: minimum fine-valve ON burst (ms)"
+        default 40
+        help
+            A burst shorter than this is dropped rather than chattering the
+            valve. One burst moves the vessel by
+            (WEIGHT_DEMO_MIN_ON_MS/1000) x the simulator's fine rate, which
+            must stay below WEIGHT_DEMO_TOLERANCE_G.
+
+    config WEIGHT_DEMO_MIN_OFF_MS
+        int "Anti-chatter: minimum fine-valve OFF gap (ms)"
+        default 40
+        help
+            A gap shorter than this is removed by holding the valve open for
+            the whole window, so the valve still sees at most one transition
+            per window.
+
+    # PID gains are integers in Kconfig, so each is scaled by 10000:
+    # an entered value of 25 means 0.0025. Only the FINE region uses them; the
+    # coarse phase is a plain binary full-open fill.
+    config WEIGHT_DEMO_PID_KP_X10000
+        int "PID Kp x10000 (duty per gram of error)"
+        default 25
+        help
+            Default 25 = 0.0025, so the proportional term alone saturates the
+            duty at 400 g of error and the valve starts modulating well before
+            the target.
+
+    config WEIGHT_DEMO_PID_KI_X10000
+        int "PID Ki x10000"
+        default 3
+
+    config WEIGHT_DEMO_PID_KD_X10000
+        int "PID Kd x10000"
+        default 1
+
+    config WEIGHT_DEMO_PID_INTEGRAL_MAX
+        int "PID integral clamp (anti-windup)"
+        default 200
+
+    # ------------------------------------------------------------------
+    # Staged dispense control (COARSE / FINE / MICRO / SETTLING)
+    # ------------------------------------------------------------------
+
+    config WEIGHT_DEMO_COARSE_THRESHOLD_G
+        int "COARSE stage: error above this (grams)"
+        default 500
+        help
+            While the remaining error exceeds this, the controller is in
+            COARSE: high duty (clamped to [0.4, 1.0]) and long pulses.
+
+    config WEIGHT_DEMO_FINE_THRESHOLD_G
+        int "FINE stage: error above this (grams)"
+        default 100
+        help
+            Below COARSE_THRESHOLD_G and above this value, the controller is
+            in FINE: moderate duty (clamped to [0.1, 0.5]).
+
+    config WEIGHT_DEMO_MICRO_THRESHOLD_G
+        int "MICRO stage: error above this (grams)"
+        default 30
+        help
+            Below FINE_THRESHOLD_G and above this value, the controller is
+            in MICRO: very conservative duty (clamped to [0, 0.15]) with
+            short pulses. Below this (within tolerance + in-flight
+            compensation), the relay closes and SETTLING begins.
+
+    config WEIGHT_DEMO_COARSE_MIN_ON_MS
+        int "COARSE stage: minimum ON pulse (ms)"
+        default 80
+
+    config WEIGHT_DEMO_FINE_MIN_ON_MS
+        int "FINE stage: minimum ON pulse (ms)"
+        default 30
+
+    config WEIGHT_DEMO_MICRO_MIN_ON_MS
+        int "MICRO stage: minimum ON pulse (ms)"
+        default 15
+        help
+            Must be short enough that one pulse cannot overshoot the tolerance
+            band. The fine valve at its slowest rate should move the vessel by
+            less than WEIGHT_DEMO_TOLERANCE_G in this interval.
+
+    config WEIGHT_DEMO_SETTLE_TIME_MS
+        int "Settle time with relay OFF before judging (ms)"
+        default 1500
+        help
+            How long to wait after closing the relay before checking the
+            result. A fresh CAS sample must arrive within this window —
+            judging on stale data is refused.
+
+    config WEIGHT_DEMO_INFLIGHT_COMP_G
+        int "In-flight overshoot compensation (grams)"
+        default 15
+        help
+            Material still travelling to the scale after the relay closes.
+            The controller stops this many grams early to compensate. Tuned
+            per-target on the server; 0 disables compensation.
+
+    config WEIGHT_DEMO_CONTROL_WATCHDOG_MS
+        int "Control-loop watchdog (ms)"
+        default 3000
+        help
+            The dispense controller stamps a heartbeat every tick. If the
+            heartbeat goes older than this while the supervisor is still
+            running, the state machine has stopped advancing: every relay is
+            forced OFF and a CONTROL_FAILURE fault is latched.
+
+    # ------------------------------------------------------------------
+    # Completion semantics
+    # ------------------------------------------------------------------
+
+    choice WEIGHT_DEMO_COMPLETION_MODE
+        prompt "How a job is judged once the target is reached"
+        default WEIGHT_DEMO_COMPLETION_PROCESS
+        help
+            PROCESS is the real-machine behaviour: hold at the setpoint, let
+            the reading settle, and treat an overshoot beyond the limit as a
+            fault. This is the only correct mode with a physical CAS scale.
+
+            RAMP_TEST is kept for the QEMU host-test project only. Its reading
+            keeps rising after the valves close, so judging it with the process
+            rules would fail every job with "overshoot after settling" for
+            behaviour the controller caused correctly.
+
+            This is an explicit, logged choice. It is never inferred from the
+            payload, so a real scale cannot inherit the relaxed rules by
+            sending a field.
+
+        config WEIGHT_DEMO_COMPLETION_RAMP_TEST
+            bool "RAMP_TEST (QEMU host tests only)"
+        config WEIGHT_DEMO_COMPLETION_PROCESS
+            bool "PROCESS (real CAS scale, strict overshoot)"
+    endchoice
+
+    config WEIGHT_DEMO_CONTROL_LOG_MS
+        int "Periodic PID control line (ms, 0 = off)"
+        default 1000
+        help
+            While a job is running, one line per interval reporting setpoint,
+            process value, error, duty and both relay states. One per second is
+            enough to follow the loop from the serial monitor; the line is
+            rate-limited, not per-tick, so it cannot become spam.
+
+    # ------------------------------------------------------------------
+    # Optional observability uploader (never in relay/control path)
+    # ------------------------------------------------------------------
+
+    config WEIGHT_DEMO_TELEMETRY_SERVER_IP
+        string "Telemetry server host (Windows LAN IPv4; empty disables)"
+        default ""
+        help
+            Use the Windows laptop LAN IPv4 address running WSL port 8000,
+            not the changing 172.x WSL address. Empty disables telemetry.
+
+    config WEIGHT_DEMO_TELEMETRY_SERVER_PORT
+        int "Telemetry server port"
+        default 8000
+
+    config WEIGHT_DEMO_TELEMETRY_API_KEY
+        string "Shared telemetry API key (empty if server key disabled)"
+        default ""
+
+    config WEIGHT_DEMO_TELEMETRY_DEVICE_ID
+        string "Telemetry device ID override (empty uses NVS device ID)"
+        default ""
+
+    config WEIGHT_DEMO_WEB_API_PORT
+        int "Web control/API port"
+        default 80
+        help
+            Serves the control page and the /api/* surface on this device's
+            static address. The weight sender's WebSocket server is on its own
+            address, so port 80 does not collide.
+
+    config WEIGHT_DEMO_RELAY_SELFTEST
+        bool "Boot-time per-channel GPIO self-test (~6 s)"
+        default n
+        help
+            One-shot boot actuation check of the DIRECT GPIO path: each AO
+            pin is driven individually for 400 ms with its command result
+            and pad readback logged, then released. Default n, and it does
+            NOT touch Relay 1 or Relay 2: those are outputs P6/P7 of the
+            confirmed PCF8574T at 0x22, not GPIOs, and the driver never
+            remaps them onto the AO nets. Use MAPTEST/PCF_TEST for the
+            confirmed expander instead.
+
+    config WEIGHT_DEMO_I2C_SDA
+        int "I2C SDA GPIO (relay expander)"
+        default 22
+        help
+            Unchanged from the existing project: SDA=GPIO22, SCL=GPIO23. The
+            relay expander is a PCF8574T at 7-bit 0x22 (A2=0, A1=1, A0=0)
+            carrying Relay 1 on P6 and Relay 2 on P7.
+
+            The address was MEASURED on the board. An earlier report said 0x25
+            (A2=1, A1=0, A0=1) - the exact inverse - and that is superseded.
+            The P6/P7 bit mapping was not retracted by the correction.
+
+    config WEIGHT_DEMO_I2C_SCL
+        int "I2C SCL GPIO (relay expander)"
+        default 23
+
+    choice WEIGHT_DEMO_RELAY_POLARITY
+        prompt "Relay expander output polarity"
+        default WEIGHT_DEMO_RELAY_POLARITY_ACTIVE_HIGH
+        help
+            ACTIVE-HIGH is the MEASURED polarity of this board. A bench
+            observation showed a complete inversion under ACTIVE-LOW: the relay
+            was ON whenever it should have been OFF and OFF whenever it should
+            have been ON, which is the signature of an ACTIVE-HIGH drive stage
+            being written with active-LOW levels.
+
+            This SUPERSEDES the earlier ACTIVE-LOW derivation, which argued
+            that a PCF8574 cannot source a relay stage so the drive must be
+            sink-driven, and that an active-HIGH board would energize its
+            relays at power-up. Both steps are sound in the abstract; both
+            failed against the actual circuit. The reasoning is kept in
+            relay_expander.h as a record, not as the shipped default.
+
+            CONSEQUENCE: because the PCF8574 powers up with every port HIGH,
+            ACTIVE-HIGH means the relays are energized between power-up and the
+            firmware's first OFF write. Keep AC loads disconnected until the
+            fixed build is flashed. Only a hardware change (e.g. pull-downs on
+            the relay-drive inputs) can remove that window.
+
+            The choice is kept so a board variant can still invert it, and
+            MAPTEST/PCF_TEST remain available to confirm it physically.
+
+        config WEIGHT_DEMO_RELAY_POLARITY_ACTIVE_LOW
+            bool "Active-LOW (0 = energized)"
+        config WEIGHT_DEMO_RELAY_POLARITY_ACTIVE_HIGH
+            bool "Active-HIGH (1 = energized)"
+    endchoice
+
+    config WEIGHT_DEMO_POLARITY_VERIFIED
+        bool "Relay mapping/polarity verified (ON commands permitted)"
+        default n
+        help
+            Gates ON commands only, and the SHIPPED BUILD HAS IT OFF. That is
+            deliberate, not an oversight, and it is why this menu entry
+            defaults to n:
+
+              - the address was corrected from a field measurement (0x25 ->
+                0x22) and the polarity from another (ACTIVE-LOW -> ACTIVE-HIGH,
+                see relay_expander.h);
+              - the inversion was observed WHILE the address was still wrong,
+                so the relays that moved may have been driven by the
+                direct-GPIO fallback rather than by this expander. Whether the
+                expander path is really ACTIVE-HIGH is therefore the
+                best-supported reading, not a closed measurement.
+
+            With this off, ON commands are suppressed with zero bus traffic
+            (one WARN per direction change) and the dosing valves do not open.
+            That is the safe direction to be wrong in. MAPTEST is NOT gated, so
+            the polarity can still be proven on the bench (mains disconnected),
+            after which set this to y, rebuild and reflash to enable actuation.
+
+            OFF commands are NEVER gated, in any configuration. Under the
+            measured ACTIVE-HIGH polarity the inactive level is the bit CLEARED
+            level, which is what every de-energize write drives — so boot,
+            Wi-Fi loss, stale weight, fault, timeout, overshoot, emergency stop
+            and the watchdog all force both relays OFF whether or not this
+            setting is on.
+
+    config WEIGHT_DEMO_I2C_PCF_TEST
+        bool "Run PCF_TEST write+readback discriminator at boot (MAINS OFF ONLY)"
+        default n
+        help
+            Walks the inactive baseline then each single-relay bit on the
+            confirmed expander at 0x22: write, immediate readback (PCF8574
+            reads return the live pin state), paired log, MISMATCH warning and
+            a 2.5 s observation prompt. The two steps that should energize
+            Relay 1 and Relay 2 (P6 and P7) are labelled. Discriminates:
+            relays click per bit => mapping confirmed; readbacks match but
+            nothing clicks => the device accepts writes but drives no relay
+            (escalate with the scan list); readback mismatches => pins
+            externally driven (same escalation). MAINS MUST BE DISCONNECTED.
+
+    config WEIGHT_DEMO_I2C_ACT_TEST
+        bool "Run ACT_TEST ON-path walk at boot (MAINS DISCONNECTED ONLY)"
+        default n
+        help
+            Walks the two dosing relays: OFF/OFF -> Relay 1 ON -> OFF ->
+            Relay 2 ON -> OFF -> BOTH ON -> OFF. Per step it logs the expected
+            wire byte, the byte written, the esp_err and a plain READBACK of the
+            live pin state, then prints an expectation-vs-actual table so the run
+            judges itself.
+
+            With P0..P5 reading HIGH the expected bytes are 0x3f (off/off),
+            0x7f (relay 1), 0xbf (relay 2), 0xff (both), 0x3f (off/off) - the
+            table prints the values actually computed for this board, which may
+            differ if the unused pins are pulled low.
+
+            ACT_TEST is NOT subject to WEIGHT_DEMO_POLARITY_VERIFIED: proving the
+            pins obey is exactly what verification requires. MAINS/LOAD MUST BE
+            DISCONNECTED for the whole run.
+
+    config WEIGHT_DEMO_AO_PINS_PREDRIVE
+        bool "Pre-drive AO GPIOs LOW + output config at boot"
+        default y
+        help
+            Safety measure kept even when the I2C expander backend is active:
+            holds possibly-wired transistor bases on the AO nets at OFF
+            through boot/brown-outs, proven inert across every boot to date,
+            and required by the direct-GPIO fallback backend. It also serves
+            channels 3..12, which are not on the confirmed expander. Disable
+            only after proving the AO nets are unconnected on this board.
+
+    config WEIGHT_DEMO_I2C_MAP_TEST
+        bool "Run expander MAPTEST at boot (MAINS DISCONNECTED ONLY)"
+        default n
+        help
+            User-attended mapping/polarity test on the confirmed expander at
+            0x22: 5 s countdown banner, Phase 1 polarity probe (both relays
+            driven to the ACTIVE level then the INACTIVE level, 3 s each with
+            record-the-answer prompts), Phase 2 a per-bit walk of all eight
+            outputs (2.5 s each, baseline restored between) to confirm or
+            correct the expected P6 = Relay 1 / P7 = Relay 2 assignment. The
+            six non-relay bits are left at their live-read values, never
+            poked. MAINS MUST BE DISCONNECTED for the whole run.
+
+    config LED_STATUS_GPIO
+        int "Status LED GPIO (-1 = no status LED)"
+        default -1
+        help
+            Must stay -1 on the 12-relay board: GPIO2 is AO12 (Relay 12) and
+            relay_driver is its single owner. Provisioning/connect hints are
+            log-only on this device.
+
+endmenu

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PID tuning profiles | BITS</title><link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}"></head>
+<body>
+{% include "nav.html" %}
+<main class="page">
+  <header class="page-heading"><div><div class="eyebrow">Engineering</div><h1 class="page-title">PID Tuning</h1><p class="page-sub">Create immutable controller profiles and stage them for the next compatible job.</p></div></header>
+  <form id="tuning-form" class="panel">
+    <div class="tuning-context">
+      <label class="form-field" for="material"><span>Material / fixed dispenser</span><select id="material"><option value="M1">Material A · CH1 · Pump 1</option><option value="M2">Material B · CH2 · Pump 2</option></select></label>
+      <label class="form-field" for="target"><span>Target scope</span><select id="target"><option value="5000">5.0 kg</option><option value="10000">10.0 kg</option><option value="15000">15.0 kg</option><option value="20000">20.0 kg</option></select></label>
+      <label class="form-field" for="profile-id"><span>Profile ID</span><input id="profile-id" maxlength="64" pattern="[A-Za-z0-9._\-]+" title="Letters, digits, dot, underscore and hyphen only (no spaces)" required placeholder="m1-5kg"></label>
+      <div class="active-profile-summary" id="active-profile-summary"><span class="status-badge neutral">NO ACTIVE PROFILE</span><span>Select a material and target to inspect its active version.</span></div>
+    </div>
+    <div class="tuning-groups">
+      <section class="tuning-group gains"><h3>PID Gains</h3><p>Primary response controls. Values are saved exactly as entered.</p><div class="tuning-fields">
+        <label class="form-field" for="kp"><span>Kp</span><input id="kp" type="number" min="0" max="1" step="0.0001" required></label>
+        <label class="form-field" for="ki"><span>Ki</span><input id="ki" type="number" min="0" max="1" step="0.0001" required></label>
+        <label class="form-field" for="kd"><span>Kd</span><input id="kd" type="number" min="0" max="1" step="0.0001" required></label>
+      </div></section>
+      <section class="tuning-group"><h3>Relay Timing</h3><p>Time-proportional output window and minimum switching intervals.</p><div class="tuning-fields">
+        <label class="form-field" for="window"><span>Window · ms</span><input id="window" type="number" min="50" max="10000" value="1000" required></label>
+        <label class="form-field" for="min-on"><span>Minimum ON · ms</span><input id="min-on" type="number" min="1" max="5000" value="50" required></label>
+        <label class="form-field" for="min-off"><span>Minimum OFF · ms</span><input id="min-off" type="number" min="1" max="5000" value="50" required></label>
+      </div></section>
+      <section class="tuning-group"><h3>Safety & Limits</h3><p>Completion tolerance and hard limits enforced by the controller.</p><div class="tuning-fields">
+        <label class="form-field" for="tolerance"><span>Tolerance · g</span><input id="tolerance" type="number" min="0" max="100000" value="20" required></label>
+        <label class="form-field" for="overshoot"><span>Max overshoot · g</span><input id="overshoot" type="number" min="0" max="100000" value="100" required></label>
+        <label class="form-field" for="timeout"><span>Max time · ms</span><input id="timeout" type="number" min="1" max="3600000" value="300000" required></label>
+      </div></section>
+    </div>
+    <div class="tuning-footer">
+      <label class="small" for="apply-both"><input id="apply-both" type="checkbox"> Apply to both pumps (M1 + M2)</label>
+      <button class="btn" id="save-profile" type="submit">Save New Version</button>
+    </div>
+    <p id="tuning-message" class="small muted" role="status" aria-live="polite"></p>
+  </form>
+
+  <section class="panel selected-profile-panel" id="selected-profile-summary" hidden></section>
+  <div class="section-heading"><div><div class="eyebrow">Configuration history</div><h2>Profile Versions</h2></div></div>
+  <div id="profile-root"><div class="empty-state"><span class="empty-icon">…</span><strong>Loading profiles</strong></div></div>
+  <div class="section-heading"><div><div class="eyebrow">Measured performance</div><h2>Recent Results</h2></div></div>
+  <div id="profile-results"><div class="empty-state"><span class="empty-icon">↗</span><strong>Select a profile version</strong><span>Its latest test results and tuning metrics will appear here.</span></div></div>
+</main>
+<script src="/static/js/common.js?v={{ asset_v }}"></script>
+<script src="/static/js/tuning.js?v={{ asset_v }}"></script>
+</body></html>

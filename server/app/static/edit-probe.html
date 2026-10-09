@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>live probe</title><link rel="stylesheet" href="/static/css/style.css?v=2026-10-08.2"></head>
+<body>
+<main class="page">
+  <form id="tuning-form" class="panel">
+    <div class="tuning-context">
+      <label class="form-field" for="material"><span>Material</span><select id="material"><option value="M1">M1</option><option value="M2">M2</option></select></label>
+      <label class="form-field" for="target"><span>Target</span><select id="target"></select></label>
+      <label class="form-field" for="profile-id"><span>Profile ID</span><input id="profile-id"></label>
+      <div class="active-profile-summary" id="active-profile-summary"></div>
+    </div>
+    <div class="tuning-groups">
+      <label class="form-field" for="kp"><span>Kp</span><input id="kp"></label>
+      <label class="form-field" for="ki"><span>Ki</span><input id="ki"></label>
+      <label class="form-field" for="kd"><span>Kd</span><input id="kd"></label>
+      <label class="form-field" for="window"><span>Window</span><input id="window"></label>
+      <label class="form-field" for="min-on"><span>Min ON</span><input id="min-on"></label>
+      <label class="form-field" for="min-off"><span>Min OFF</span><input id="min-off"></label>
+      <label class="form-field" for="tolerance"><span>Tolerance</span><input id="tolerance"></label>
+      <label class="form-field" for="overshoot"><span>Overshoot</span><input id="overshoot"></label>
+      <label class="form-field" for="timeout"><span>Timeout</span><input id="timeout"></label>
+    </div>
+    <div class="tuning-footer">
+      <label class="small" for="apply-both"><input id="apply-both" type="checkbox"> Both</label>
+      <button class="btn" id="save-profile" type="submit">Save New Version</button>
+    </div>
+    <p id="tuning-message" class="small muted"></p>
+  </form>
+  <section class="panel selected-profile-panel" id="selected-profile-summary" hidden></section>
+  <div id="profile-root"></div>
+  <div id="profile-results"></div>
+</main>
+<div id="toast-region"></div>
+<div id="report" style="white-space:pre-wrap;font-family:monospace"></div>
+<script src="/static/js/common.js?v=2026-10-08.2"></script>
+<script src="/static/js/tuning.js?v=2026-10-08.2"></script>
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    setTimeout(function () {
+      var report = [];
+      try {
+        report.push('rows rendered: ' + document.querySelectorAll('#profile-root tbody tr').length);
+        var editBtns = document.querySelectorAll('[data-edit-profile]');
+        report.push('edit buttons: ' + editBtns.length);
+        var editBtn = editBtns[0];
+        if (!editBtn) throw new Error('no edit button found');
+        report.push('edit outer: ' + editBtn.outerHTML);
+        report.push('dataset.editProfile: ' + JSON.stringify(editBtn.dataset.editProfile));
+        report.push('dataset.version: ' + JSON.stringify(editBtn.dataset.version));
+        var errs = [];
+        window.addEventListener('error', function (e) { errs.push(String(e.message)); });
+        editBtn.click();
+        report.push('js errors during click: ' + (errs.length ? errs.join(' | ') : 'none'));
+        report.push('profile-id: ' + JSON.stringify(document.getElementById('profile-id').value));
+        report.push('kp: ' + JSON.stringify(document.getElementById('kp').value));
+        report.push('target: ' + JSON.stringify(document.getElementById('target').value));
+        report.push('save button text: ' + JSON.stringify(document.getElementById('save-profile').textContent));
+        report.push('tuning-message: ' + JSON.stringify(document.getElementById('tuning-message').textContent));
+        report.push('tuning-message class: ' + document.getElementById('tuning-message').className);
+        report.push('selected row present: ' + !!document.querySelector('#profile-root tr.selected-row'));
+      } catch (e) {
+        report.push('PROBE ERROR: ' + (e && e.stack ? e.stack : e));
+      }
+      document.getElementById('report').textContent = report.join('\n');
+      document.title = 'HARNESS_DONE';
+    }, 1000);
+  });
+</script>
+</body>
+</html>

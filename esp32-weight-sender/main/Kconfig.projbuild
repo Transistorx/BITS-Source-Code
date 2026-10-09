@@ -1,0 +1,111 @@
+menu "Weight WebSocket Bench Test (weight sender)"
+
+    # Wi-Fi credentials are no longer set here. They are stored in NVS by the
+    # provisioning portal: hold BOOT (GPIO0) for 3 s, join the "BITS-Scale-XXXX"
+    # access point (XXXX from the unique device id) and submit the form at
+    # http://192.168.4.1. Holding BOOT for 10 s erases the stored credentials
+    # (provisioning reset) before reopening the portal.
+
+    config WEIGHT_DEMO_STATIC_IP
+        string "Static IPv4 address (empty = DHCP)"
+        default "192.168.137.217"
+        help
+            Applied to the STA interface before connecting: the DHCP client is
+            stopped and this address is set with esp_netif_set_ip_info. The
+            relay controller targets this address directly.
+
+    config WEIGHT_DEMO_GATEWAY
+        string "Gateway"
+        default "192.168.137.1"
+
+    config WEIGHT_DEMO_NETMASK
+        string "Netmask"
+        default "255.255.255.0"
+
+    config WEIGHT_DEMO_WS_PORT
+        int "WebSocket server port"
+        default 80
+        help
+            HTTP server port carrying the /ws WebSocket endpoint.
+
+    config WEIGHT_DEMO_WS_PATH
+        string "WebSocket URI path"
+        default "/ws"
+
+    config LED_STATUS_GPIO
+        int "Status LED GPIO (-1 = no status LED)"
+        default 2
+        help
+            GPIO2 is the module's onboard blue LED. This board has no relay
+            outputs, so the LED is free to show provisioning/connect state.
+
+    config WEIGHT_DEMO_MDNS_HOSTNAME
+        string "mDNS hostname"
+        default "weight-sender"
+        help
+            Advertised as <hostname>.local. Diagnostic convenience only: the
+            relay controller targets the static IP above as its primary
+            address.
+
+    # -------------------------------------------------------------------------
+    # Production weight source is PHYSICAL CAS RS232 ONLY.
+    #
+    # There is no source-mode choice and no simulator model: those were removed
+    # from production. When the CAS scale is silent, malformed or stale, NOTHING
+    # is published and the relay controller's stale-weight failsafe fires. A
+    # substituted weight would hide a real fault and could drive a dispense.
+    # -------------------------------------------------------------------------
+
+    config WEIGHT_DEMO_CAS_STALE_MS
+        int "CAS link STALE threshold (ms without a fresh weight field)"
+        default 3000
+        range 500 30000
+        help
+            How long a genuine CAS weight field may go unseen before the link
+            is reported STALE and the sample is no longer published.
+
+    config WEIGHT_DEMO_CAS_OFFLINE_MS
+        int "CAS link OFFLINE threshold (ms without any valid frame)"
+        default 10000
+        range 1000 120000
+        help
+            How long without any valid CAS frame at all before the link is
+            reported OFFLINE.
+
+    config WEIGHT_DEMO_CAS_LOG_PERIOD_MS
+        int "CAS serial diagnostic period (ms)"
+        default 1000
+        range 100 60000
+        help
+            Rate limit for the CAS SCALE status/sample serial lines. Kept
+            finite so diagnostics cannot starve the UART RX task.
+
+    # Board pin-map variant / active channel live in components/board/Kconfig,
+    # and WEIGHT_DEMO_TEST_SIMULATION lives in components/weight_source/Kconfig,
+    # so the QEMU test project (which has its own main and never loads this
+    # file) sees the same symbols.
+
+    config WEIGHT_DEMO_CH1_BAUD
+        int "Scale channel 1 baud"
+        default 9600
+        help
+            CAS CI-150A stream rate (COMM.03 = CBR1.3). Framing is 8N1
+            (COMM.02 = CPR1.0): 8 data bits, no parity, 1 stop bit.
+
+    config WEIGHT_DEMO_CH2_BAUD
+        int "Scale channel 2 baud"
+        default 9600
+
+    config WEIGHT_DEMO_LOG_SCALE_FRAMES
+        bool "DEPRECATED alias of SCALE_TRACE_FRAMES (very verbose)"
+        default n
+        help
+            Kept so old sdkconfig files still work: enabling it turns on the
+            same trace as CONFIG_SCALE_TRACE_FRAMES (Serial logging menu,
+            DEBUG level on tag RS485). Prefer the new symbol.
+
+            A CI-150A in stream mode sends about 22 frames/s per channel, so
+            this floods the monitor at roughly 44 lines/s across both channels
+            and buries the 1 Hz WebSocket traffic.
+
+endmenu

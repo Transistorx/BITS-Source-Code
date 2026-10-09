@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Global dispensing queue | BITS</title><link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
+</head>
+<body>
+{% include "nav.html" %}
+<main class="page">
+  <header class="page-heading">
+    <div><div class="eyebrow">Operations</div><h1 class="page-title">Dispensing Queue</h1><p class="page-sub">Submit jobs and monitor both fixed material channels.</p></div>
+    <span class="status-badge neutral" id="queue-live-status">Connecting</span>
+  </header>
+  <section class="kpi-strip" id="queue-kpis" aria-label="Operational summary">
+    <div class="metric"><span>Controller</span><strong id="kpi-controller">—</strong></div>
+    <div class="metric"><span>Waiting jobs</span><strong id="kpi-waiting">—</strong></div>
+    <div class="metric"><span>Active job</span><strong id="kpi-active">—</strong></div>
+    <div class="metric"><span>Last telemetry</span><strong id="kpi-telemetry">—</strong></div>
+  </section>
+  <section class="panel new-job-panel" aria-labelledby="new-job-title">
+    <div class="panel-heading"><div><h2 id="new-job-title">New Job</h2><span class="small muted">Jobs enter one global priority/FIFO queue.</span></div></div>
+    <form id="job-form">
+      <div class="new-job-grid">
+        <label class="form-field" for="job-material"><span>Material</span><select id="job-material" required><option value="M1">Material A · Pump 1</option><option value="M2">Material B · Pump 2</option></select></label>
+        <label class="form-field" for="job-target"><span>Target weight</span><select id="job-target" required><option value="5000">5.0 kg</option><option value="10000">10.0 kg</option><option value="15000">15.0 kg</option><option value="20000">20.0 kg</option></select></label>
+        <label class="form-field" for="job-profile"><span>PID profile</span><select id="job-profile" required aria-describedby="job-profile-help"></select></label>
+        <label class="form-field" for="job-priority"><span>Priority</span><select id="job-priority"><option value="0">Normal · FIFO</option><option value="1">Priority</option></select></label>
+        <button class="btn" id="add-job" type="submit">Add to Queue</button>
+      </div>
+    </form>
+    <div class="profile-preview" id="job-profile-preview" aria-live="polite">
+      <span class="muted small">Select a PID profile to preview its exact values.</span>
+    </div>
+    <p id="job-profile-help" class="small muted">Only versions tuned for this material and target are listed. The exact version you pick is locked to the job.</p>
+    <p id="job-message" class="small muted" role="status" aria-live="polite"></p>
+  </section>
+  <div class="section-heading"><div><div class="eyebrow">Live process</div><h2>Active Dispensers</h2></div><span id="connection-detail" class="small muted"></span></div>
+  <section id="channel-cards" class="channel-grid" aria-live="polite"></section>
+  <div class="section-heading"><div><div class="eyebrow">Dispatch</div><h2>Global Waiting Queue</h2></div><span class="small muted">Priority first, FIFO within priority</span></div>
+  <div id="queue-root"><div class="empty-state"><span class="empty-icon">…</span><strong>Loading queue</strong></div></div>
+</main>
+<script src="/static/js/common.js?v={{ asset_v }}"></script><script src="/static/js/queue.js?v={{ asset_v }}"></script>
+</body></html>

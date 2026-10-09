@@ -1,0 +1,41 @@
+CONFIG_IDF_TARGET="esp32"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+# WebSocket server support in esp_http_server, for the /ws endpoint.
+CONFIG_HTTPD_WS_SUPPORT=y
+# IDF v6.1 does NOT invoke the URI handler for the WS handshake itself
+# (httpd_uri.c L339-367 sends the 101 and skips uri->handler), so client-fd
+# registration must happen in the post-handshake callback — a field that only
+# exists on httpd_uri_t when this option is compiled in.
+CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
+CONFIG_LWIP_TCPIP_CORE_LOCKING=y
+CONFIG_ESP_WIFI_IRAM_OPT=y
+CONFIG_ESP_WIFI_RX_IRAM_OPT=y
+CONFIG_LOG_COLORS=y
+# Serial logging: INFO everywhere. Raw-frame / MQTT-payload traces are opt-in
+# (CONFIG_SCALE_TRACE_FRAMES, CONFIG_MQTT_TRACE_PAYLOADS, both default n) and
+# also need CONFIG_LOG_MAXIMUM_LEVEL_DEBUG to exist in the image.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_HEALTH_SUMMARY_PERIOD_S=15
+# Custom partition table: 3 MB application partition (see partitions.csv).
+# The default 1 MB app slot is too small for this firmware.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Deterministic ramp simulator is the authoritative bench mode (see Kconfig).
+# (Production Kconfig no longer defines the ramp/sim mode symbols; these lines
+# are inert and kept only so an older .config diff stays legible.)
+# CONFIG_WEIGHT_DEMO_SIM_MODE_RAMP is not set
+
+# --- Weighing-scale board pin map -------------------------------------------
+# One authoritative mapping in components/board/include/board_pins.h. The
+# variant choice selects which map is compiled; the GPIO/UART numbers are
+# NOT Kconfig values, so they cannot be scattered or set to an invalid pair.
+CONFIG_WEIGHT_DEMO_BOARD_RS485_MAX13487E=y
+# CONFIG_WEIGHT_DEMO_BOARD_RS232_LEGACY is not set
+
+# Single physical CAS CI-150A, wired to RS-485 CHANNEL 1 (UART1, TX=GPIO13,
+# RX=GPIO15 = MTDO strap pad). Hardware fact confirmed by the user 2026-10-09.
+# NVS key "scale_ch" overrides at boot. Never remap pins without the schematic.
+CONFIG_WEIGHT_DEMO_SCALE_ACTIVE_CHANNEL=1
+

@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BITS Dispense Telemetry — Run Detail</title>
+  <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+</head>
+<body>
+  {% include "nav.html" %}
+
+  <main class="page" id="detail-root">
+    <div class="state-box" role="status">Loading run…</div>
+  </main>
+
+  <script src="/static/js/common.js?v={{ asset_v }}"></script>
+  <script src="/static/js/run_detail.js?v={{ asset_v }}"></script>
+</body>
+</html>

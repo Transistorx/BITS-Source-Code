@@ -1,0 +1,4 @@
+# WiFi credentials are set as literal strings in NVS_KEY_TABLE inside
+# components/nvs_config/include/nvs_config.h (WIFI_SSID_1 / WIFI_PASS_1).
+# They are written to NVS once on first boot by nvs_config_load_defaults().
+# To apply a new credential: erase-flash then reflash.

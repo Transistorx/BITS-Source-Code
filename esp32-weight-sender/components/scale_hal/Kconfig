@@ -1,0 +1,64 @@
+menu "Scale reader safety policy"
+
+    # Owned by scale_hal so production firmware and the QEMU test project see
+    # the same symbols.
+
+    choice SCALE_PROTOCOL
+        prompt "Scale protocol"
+        default SCALE_PROTOCOL_CI2001
+        help
+            The weight source feeding the dispensing brain must decode ONE
+            protocol only. Auto-detection makes any stray line that happens to
+            parse (including the tail of a truncated frame) publishable as a
+            weight, so it is not part of the production configuration.
+
+        config SCALE_PROTOCOL_CI2001
+            bool "CAS CI-2001 / CI-150A only (production)"
+            help
+                Only cas_ci2001_protocol is registered. No auto-detection, no
+                generic ASCII fallback, no other parser is compiled in.
+
+        config SCALE_PROTOCOL_AUTODETECT_LEGACY
+            bool "Legacy auto-detect over all parsers (tests / bench only)"
+            help
+                Compiles asuki, asuki-k1, flintec, cas and the generic ASCII
+                fallback and lets the application opt in at run time. Used by
+                the QEMU suite. NOT for a dispensing weight source.
+    endchoice
+
+    config SCALE_ALLOW_GENERIC_FALLBACK
+        bool "Legacy: also use the generic ASCII fallback parser"
+        depends on SCALE_PROTOCOL_AUTODETECT_LEGACY
+        default n
+
+    config SCALE_CI2001_STRICT_PAD
+        bool "Reject CI-150A frames whose pad byte (byte 17) differs from the expected value"
+        default n
+        help
+            The CI-150A manual shows byte 17 but this repository holds no
+            documented value for it. Leave OFF until the value has been read
+            from the bench RAW CAPTURE log line (pad=0x..) of a healthy scale.
+
+    config SCALE_CI2001_PAD_VALUE
+        int "Expected pad byte value (0..255)"
+        depends on SCALE_CI2001_STRICT_PAD
+        range 0 255
+        default 0
+        help
+            Set from the captured bench value; 0 is only a placeholder.
+
+    config SCALE_READER_STALL_GAP_MS
+        int "Reader stall threshold (ms)"
+        default 250
+        range 50 2000
+        help
+            If the reader task did not run for longer than this, bytes in the
+            RX ring were time-stamped late. The ring is flushed and the
+            assembler discards up to the next terminator (fail-safe).
+
+    config SCALE_RAW_CAPTURE_PERIOD_MS
+        int "RAW CAPTURE log period for the selected channel (ms)"
+        default 15000
+        range 5000 120000
+
+endmenu

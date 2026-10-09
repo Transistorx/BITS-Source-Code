@@ -1,0 +1,34 @@
+menu "Serial logging (log_util)"
+
+    # Owned by components/log_util so the production firmware and the QEMU test
+    # project (which never loads production main/Kconfig.projbuild) see the
+    # same symbols.
+
+    config SCALE_TRACE_FRAMES
+        bool "Trace raw scale frames (DEBUG, very verbose)"
+        default n
+        help
+            Logs every assembled RS-485/RS-232 frame at DEBUG on tag RS485. A
+            CI-150A streams about 22 frames/s per channel, so this buries the
+            monitor. Also requires Component config > Log > Maximum log
+            verbosity = Debug, otherwise the DEBUG lines are compiled out.
+            Replaces WEIGHT_DEMO_LOG_SCALE_FRAMES, which still works as an alias.
+
+    config MQTT_TRACE_PAYLOADS
+        bool "Trace MQTT payloads (DEBUG)"
+        default n
+        help
+            Logs outbound and inbound MQTT topic + payload at DEBUG on tag MQTT.
+            Payloads never contain credentials. Needs Maximum log verbosity =
+            Debug as well.
+
+    config HEALTH_SUMMARY_PERIOD_S
+        int "Health summary period in seconds (0 = off)"
+        default 15
+        range 0 60
+        help
+            One compact "SYS: up=.. heap=.. mqtt=.. scale=.." line at this
+            period from the low-priority diag task. 0 disables it; otherwise
+            use 5..60.
+
+endmenu

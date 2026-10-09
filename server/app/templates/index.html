@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>BITS | Test Graphs</title><link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+</head>
+<body>
+{% include "nav.html" %}
+<main class="page">
+  <header class="page-heading">
+    <div><div class="eyebrow">Process analysis</div><h1 class="page-title">Graphs / Test History</h1><p class="page-sub">Independent tuning traces for the four standard dispensing targets.</p></div>
+    <div class="graph-toolbar-actions"><a class="btn secondary" href="/live">Live Monitor</a><a class="btn secondary" href="/history">Search All History</a></div>
+  </header>
+  <section class="panel graph-toolbar" aria-label="Graph filters">
+    <div><span class="stat-label">Material / fixed channel</span><div class="material-tabs" id="material-tabs" role="tablist" aria-label="Material selection"><button class="material-tab active" type="button" data-material="M1" role="tab" aria-selected="true">Material A | Pump 1</button><button class="material-tab" type="button" data-material="M2" role="tab" aria-selected="false">Material B | Pump 2</button></div></div>
+    <div><div class="small muted" id="graphs-context">Material A · CH1</div><div class="small muted" id="graphs-updated">Loading…</div></div>
+  </section>
+  <section class="target-grid" id="target-grid" aria-live="polite"></section>
+</main>
+<dialog class="compare-dialog" id="compare-dialog">
+  <div class="dialog-head"><div><div class="eyebrow">Compatible run overlay</div><h2 id="compare-title">Compare runs</h2><p class="small muted" id="compare-context"></p></div><button class="dialog-close" data-close-compare type="button" aria-label="Close comparison">×</button></div>
+  <div class="dialog-body"><div class="compare-run-list" id="compare-options"></div><div class="compare-chart-box" id="comparison-chart"><div class="empty-state compact"><strong>Choose compatible runs</strong></div></div></div>
+  <div class="dialog-actions"><button class="btn secondary" data-close-compare type="button">Close</button><button class="btn" id="compare-runs" type="button">Build overlay</button></div>
+</dialog>
+<script src="/static/js/common.js?v={{ asset_v }}"></script><script src="/static/js/dashboard.js?v={{ asset_v }}"></script>
+</body></html>

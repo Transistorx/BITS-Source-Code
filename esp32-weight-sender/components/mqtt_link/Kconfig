@@ -1,0 +1,39 @@
+menu "MQTT link (status + remote scale commands)"
+
+    config MQTT_LINK_BROKER_URI
+        string "Broker URI (empty disables MQTT)"
+        default "mqtt://192.168.137.1:1883"
+        help
+            Mosquitto in WSL, same host the devices already reach. The URI is
+            logged only with any user:password@ part removed.
+
+    config MQTT_LINK_DEVICE_ID_OVERRIDE
+        string "Device id override (empty = NVS device_id)"
+        default ""
+        help
+            Topics are cas/{device}/... where {device} is [A-Za-z0-9._-]{1,64}.
+            Left empty, the NVS device_id derived from the Wi-Fi MAC is used.
+
+    config MQTT_LINK_USERNAME
+        string "Broker username (empty = anonymous)"
+        default ""
+
+    config MQTT_LINK_PASSWORD
+        string "Broker password"
+        default ""
+        help
+            Never logged.
+
+    config MQTT_LINK_KEEPALIVE_S
+        int "MQTT keepalive (seconds)"
+        default 30
+        range 5 120
+
+    config MQTT_LINK_STATUS_PERIOD_MS
+        int "telemetry/status publish period (ms)"
+        default 5000
+        range 1000 8000
+        help
+            Must stay under the server's 10 s device-online threshold.
+
+endmenu

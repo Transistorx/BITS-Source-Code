@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BITS Dispense Telemetry — History</title>
+  <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
+</head>
+<body>
+  {% include "nav.html" %}
+
+  <main class="page">
+    <h1 class="page-title">Run History</h1>
+    <p class="page-sub">Stored runs and their test details. Filters apply automatically. Each row can be deleted individually.</p>
+
+    <form class="filter-bar" id="filter-form" aria-label="Run filters">
+      <div class="field"><label for="filter-material">Material</label>
+        <select id="filter-material" name="material_id"><option value="">All materials</option><option value="M1">Material A · Pump 1</option><option value="M2">Material B · Pump 2</option></select>
+      </div>
+      <div class="field">
+        <label for="filter-channel">Channel</label>
+        <select id="filter-channel" name="channel_id">
+          <option value="">Both channels</option><option value="CH1">CH1 · Relay 1</option><option value="CH2">CH2 · Relay 2</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="filter-target">Target weight</label>
+        <select id="filter-target" name="target">
+          <option value="">Any target</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="filter-status">Result</label>
+        <select id="filter-status" name="status">
+          <option value="">Any status</option>
+          <option value="RUNNING">RUNNING</option>
+          <option value="COMPLETE">COMPLETE</option>
+          <option value="FAILED">FAILED</option>
+          <option value="CANCELLED">CANCELLED</option>
+        </select>
+      </div>
+      <div class="field"><label for="filter-profile">Profile ID</label><input id="filter-profile" name="profile_id" maxlength="64"></div>
+      <div class="field"><label for="filter-version">Profile version</label><input id="filter-version" name="profile_version" type="number" min="1"></div>
+      <div class="field">
+        <label for="filter-from">From (local time)</label>
+        <input type="datetime-local" id="filter-from" name="from">
+      </div>
+      <div class="field">
+        <label for="filter-to">To (local time)</label>
+        <input type="datetime-local" id="filter-to" name="to">
+      </div>
+      <div class="field">
+        <label for="filter-run-id">Run ID (exact match)</label>
+        <input type="text" id="filter-run-id" name="run_id" class="run-id-input"
+               placeholder="bits-…-j7-1834-a3f9" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="reset-filters">&nbsp;</label>
+        <button type="button" class="btn secondary" id="reset-filters">Clear filters</button>
+      </div>
+    </form>
+
+    <div id="results-root">
+      <div class="state-box" role="status">Loading runs…</div>
+    </div>
+
+    <div class="pagination" id="pagination" hidden>
+      <button type="button" class="btn secondary" id="prev-btn" aria-label="Previous page">← Prev</button>
+      <button type="button" class="btn secondary" id="next-btn" aria-label="Next page">Next →</button>
+      <span class="page-info" id="page-info" role="status" aria-live="polite"></span>
+    </div>
+  </main>
+
+  <script src="/static/js/common.js?v={{ asset_v }}"></script>
+  <script src="/static/js/history.js?v={{ asset_v }}"></script>
+</body>
+</html>

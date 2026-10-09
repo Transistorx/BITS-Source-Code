@@ -1,0 +1,16 @@
+menu "Weight source (CAS / test helpers)"
+
+    # Owned by the weight_source component so EVERY project that links it
+    # (production firmware and the QEMU test suite) sees the symbol. The QEMU
+    # project has its own main and never loads production main/Kconfig.projbuild.
+
+    config WEIGHT_DEMO_TEST_SIMULATION
+        bool "TEST ONLY: compile the pure simulator helpers"
+        default n
+        help
+            Compiles weight_sim_* / weight_ramp_* into the image. These are the
+            QEMU host-test helpers. They are NOT a runtime weight source and
+            production firmware must never enable this. Nothing in the
+            production path reads these symbols.
+
+endmenu
