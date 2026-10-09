@@ -24,7 +24,7 @@ import ssl
 import threading
 import time
 from datetime import timezone
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import (BaseModel, ConfigDict, Field, StrictBool, StrictInt, ValidationError,
                       field_validator, model_validator)
@@ -665,7 +665,7 @@ _client = None
 # --- connection state (health) ---------------------------------------------
 
 _state_lock = threading.Lock()
-_conn = {"connected": False, "pending": set(), "granted": False}
+_conn: dict[str, Any] = {"connected": False, "pending": set(), "granted": False}
 _recovered = False  # startup recovery runs once per process, never on reconnect
 
 

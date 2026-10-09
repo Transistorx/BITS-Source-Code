@@ -51,12 +51,28 @@ applies; browser EventSource cannot supply an API-key header, so deployments
 requiring authenticated reads need a same-origin session/proxy authentication
 integration before enabling `READS_REQUIRE_KEY` for browser pages.
 
+`/api/v1/live/ws` (sender weights and ZERO/TARE, `app/static/js/live_ws.js`)
+follows the same read policy: with `READS_REQUIRE_KEY=true` and a non-empty
+`API_KEY` the socket sends nothing until the client proves the key, either as
+the `X-API-Key` header or as the first frame `{"type":"auth","api_key":...}`
+within `LIVE_WS_AUTH_TIMEOUT_MS`; anything else closes the socket with 1008
+before any snapshot. The live page prompts for the key once on that close.
+A handshake with an `Origin` header is refused (1008) unless the origin host
+equals the `Host` header or the origin is listed in `CORS_ORIGINS`; non-browser
+clients without `Origin` are unaffected. `BENCH_OPEN_WRITES=true` only opens
+commands to loopback clients (127.0.0.1, ::1). At most `MAX_WS_CLIENTS` sockets
+are served; extra handshakes are refused with 1013 and the browser retries with
+backoff. Run uvicorn with `--ws-max-size 1024` so oversize frames are dropped
+by the server before buffering (the application limit is 512 bytes). The broker
+side of the same hazard (HZ-10) is covered by the ACL template in
+`deploy/mosquitto/README.md`.
+
 On WSL Ubuntu, use the project virtual environment and existing `.env` values:
 
 ```bash
 source .venv-wsl/bin/activate
 python -m pytest tests -q
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --ws-max-size 1024
 ```
 
 The MQTT bridge and the live command path require a single worker. With
@@ -278,7 +294,7 @@ credentials. See section 3 for every variable.
 ### 2.4 Run
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --ws-max-size 1024
 ```
 
 Binding `0.0.0.0` is required so the ESP32 and LAN browsers can reach the
@@ -305,8 +321,14 @@ Source of truth: `server/.env.example` and `server/app/config.py`.
 | `HOST` | `0.0.0.0` | Uvicorn bind address. Keep `0.0.0.0` so the ESP32 and LAN browsers can reach it. |
 | `PORT` | `8000` | Uvicorn port; must match the firmware's `WEIGHT_DEMO_TELEMETRY_SERVER_PORT`. |
 | `API_KEY` | *(empty)* | Shared key checked against the `X-API-Key` header on every write. Empty = writes open (bench mode). Must match `WEIGHT_DEMO_TELEMETRY_API_KEY` in the firmware config. |
-| `READS_REQUIRE_KEY` | `false` | When `true`, dashboard read endpoints also require `X-API-Key`. |
-| `CORS_ORIGINS` | *(empty)* | Comma-separated allowed origins. Empty = same-origin only, which is the normal case: the dashboard is served by this server and the ESP32 sends no CORS preflight for its simple JSON POSTs. |
+| `READS_REQUIRE_KEY` | `false` | When `true`, dashboard read endpoints and the live WebSocket also require `X-API-Key` (WebSocket: header or first `auth` frame). |
+| `CORS_ORIGINS` | *(empty)* | Comma-separated allowed origins. Empty = same-origin only, which is the normal case: the dashboard is served by this server and the ESP32 sends no CORS preflight for its simple JSON POSTs. Also the WebSocket `Origin` allowlist beyond same-host. |
+| `LIVE_WS_DEVICE_WHITELIST` | *(empty)* | Comma-separated sender ids that may receive ZERO/TARE over the live WebSocket. Empty refuses every command. |
+| `LIVE_WS_AUTH_TIMEOUT_MS` | `3000` | With `READS_REQUIRE_KEY=true`, time a WebSocket client has to send its `auth` frame before a 1008 close (200..30000). |
+| `LIVE_WS_CLIENT_TIMEOUT_MS` | `3000` | Time to wait for a device ack before reporting `unknown` to the WebSocket client (500..30000). |
+| `LIVE_WS_SEND_TIMEOUT_MS` | `2000` | Per-frame send timeout; a stalled client is disconnected (200..30000). |
+| `MAX_WS_CLIENTS` | `16` | Maximum concurrent live WebSocket clients, pre-auth sockets included; extra handshakes get 1013 (1..256). |
+| `BENCH_OPEN_WRITES` | `false` | Bench only: with an empty `API_KEY`, allow ZERO/TARE from loopback WebSocket clients without a key. Never on a LAN deployment. |
 
 ---
 
