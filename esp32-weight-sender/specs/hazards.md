@@ -1,0 +1,27 @@
+# Hazard register (esp32-weight-sender)
+
+Index only. Each feature block points at the full FMEA spec that carries cause, effect, detection, safe state, requirements and verification. Ids are reused, never renumbered.
+
+## Feature: per-frame weight over MQTT, runtime broker config, server WebSocket live path (2026-10-09)
+Full analysis: docs/superpowers/specs/2026-10-09-weight-mqtt-ws-hazards.md (HZ-01..HZ-21, REQ-WMQ-01..55).
+- HZ-01 per-frame publish burst exhausts shared 8-slot queue, CPU, heap, weight_tx stack (med)
+- HZ-02 shared queue and single pub task starve inbound commands and acks (med)
+- HZ-03 1 s heartbeat republish shows a stopped scale as live (high)
+- HZ-04 replayed, duplicated or spoofed weight accepted as live (med, SEC)
+- HZ-05 firmware weight schema (src_uart) vs server model (channel) mismatch: stream silently rejected (med)
+- HZ-06 broker loss and reconnect bursts (med)
+- HZ-07 half-open TCP: frozen weight, late ZERO/TARE with TTL counted from device receipt, no wall clock (high, SEC)
+- HZ-08 NVS broker config missing, partial, corrupt or hostile; Kconfig fallback, no bricking (high, SEC)
+- HZ-09 credential exposure in logs, portal, git, flash (med, SEC)
+- HZ-10 unauthorized ZERO/TARE via MQTT, no sender authentication, broker ACL needed (med, SEC)
+- HZ-11 unauthorized, flooded or duplicated ZERO/TARE via WebSocket (med, SEC)
+- HZ-12 command_id collision and ack misrouting between WS path and DeviceCommand path (med)
+- HZ-13 retained command replay (low, mitigated)
+- HZ-14 server 3 s ack timeout shorter than device execute plus settle; operator double-issues (med)
+- HZ-15 device reboot mid-command (low)
+- HZ-16 paho thread to asyncio handoff fails or blocks (med)
+- HZ-17 slow or stalled WebSocket clients (low)
+- HZ-18 multiple server workers: duplicate client_id, per-process live state and locks (med)
+- HZ-19 task hang in weight_tx, mqtt_pub or scale_cmd (med)
+- HZ-20 scale command transmit on the passive RS-485 bus once an encoder is verified (high when enabled)
+- HZ-21 design risk: future pump acts on this weight via Wi-Fi/MQTT/server only; needs independent non-network stop (high, out of scope)
